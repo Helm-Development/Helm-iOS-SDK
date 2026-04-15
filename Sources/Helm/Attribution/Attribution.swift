@@ -29,13 +29,9 @@ public final class Attribution {
         guard !store.hasChecked else { return }
 
         do {
-            let ip = try await IPResolver.fetchPublicIP()
-
             let deviceId = store.deviceId
 
             let body: [String: Any] = [
-                "ip": ip,
-                "user_agent": "Helm-iOS-SDK/1.0",
                 "device_id": deviceId
             ]
 
