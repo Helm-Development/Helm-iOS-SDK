@@ -1,0 +1,51 @@
+import Foundation
+
+/// Makes authenticated HTTP requests to the Helm API.
+internal struct HelmHTTPClient {
+
+    /// POST JSON to a Helm API endpoint.
+    ///
+    /// - Parameters:
+    ///   - path: The API path (e.g. "/attribution/match/").
+    ///   - body: A dictionary that will be serialized to JSON.
+    /// - Returns: The parsed JSON response as a dictionary.
+    /// - Throws: `HelmError` on configuration, network, or parsing failures.
+    static func post(path: String, body: [String: Any]) async throws -> [String: Any] {
+        guard let config = Configuration.shared else {
+            throw HelmError.notConfigured
+        }
+
+        guard let url = URL(string: config.baseURL + path) else {
+            throw HelmError.invalidResponse
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 10
+        request.setValue("Bearer \(config.publishableKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw HelmError.networkError(error)
+        }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw HelmError.invalidResponse
+        }
+
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let bodyString = String(data: data, encoding: .utf8) ?? ""
+            throw HelmError.serverError(httpResponse.statusCode, bodyString)
+        }
+
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw HelmError.invalidResponse
+        }
+
+        return json
+    }
+}
