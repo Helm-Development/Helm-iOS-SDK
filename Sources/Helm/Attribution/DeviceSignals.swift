@@ -28,9 +28,21 @@ internal struct DeviceSignals {
         #endif
 
         let tz = TimeZone.current.identifier
-        let loc = Locale.current.languageCode ?? "en"
+
+        // Match navigator.language format: "en-US" not just "en"
+        let langCode = Locale.current.languageCode ?? "en"
+        let regionCode = Locale.current.regionCode ?? ""
+        let loc = regionCode.isEmpty ? langCode : "\(langCode)-\(regionCode)"
+
+        // Safari UA reports the marketing iOS version (e.g. "18.7"), not the
+        // internal Darwin version (e.g. "26.4"). We must match what the JS
+        // interstitial collects from the UA string.
+        #if canImport(UIKit)
+        let osVer = UIDevice.current.systemVersion  // "18.7" marketing version
+        #else
         let v = ProcessInfo.processInfo.operatingSystemVersion
         let osVer = "\(v.majorVersion).\(v.minorVersion)"
+        #endif
 
         return DeviceSignals(
             screenWidth: width,
