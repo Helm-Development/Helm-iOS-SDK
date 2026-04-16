@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let logger = Logger(subsystem: "dev.helmcode.helm", category: "http")
 
 /// Makes authenticated HTTP requests to the Helm API.
 internal struct HelmHTTPClient {
@@ -26,10 +29,13 @@ internal struct HelmHTTPClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
+        logger.info("POST \(url.absoluteString, privacy: .public)")
+
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await URLSession.shared.data(for: request)
         } catch {
+            logger.error("network error: \(error.localizedDescription, privacy: .public)")
             throw HelmError.networkError(error)
         }
 
@@ -37,8 +43,10 @@ internal struct HelmHTTPClient {
             throw HelmError.invalidResponse
         }
 
+        let bodyString = String(data: data, encoding: .utf8) ?? ""
+        logger.info("response: status=\(httpResponse.statusCode) body=\(bodyString, privacy: .public)")
+
         guard (200..<300).contains(httpResponse.statusCode) else {
-            let bodyString = String(data: data, encoding: .utf8) ?? ""
             throw HelmError.serverError(httpResponse.statusCode, bodyString)
         }
 

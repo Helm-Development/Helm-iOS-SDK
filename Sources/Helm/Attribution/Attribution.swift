@@ -26,10 +26,14 @@ public final class Attribution {
     }
 
     private func _match() async {
-        guard !store.hasChecked else { return }
+        guard !store.hasChecked else {
+            logger.info("match() skipped — already checked")
+            return
+        }
 
         do {
             let deviceId = store.deviceId
+            logger.info("match() starting — device_id=\(deviceId, privacy: .public)")
 
             let body: [String: Any] = [
                 "device_id": deviceId
@@ -40,11 +44,15 @@ public final class Attribution {
                 body: body
             )
 
+            logger.info("match() response: \(response, privacy: .public)")
+
             if let matched = response["matched"] as? Bool, matched {
                 let attributionId = response["attribution_id"] as? String ?? ""
                 store.storeMatch(attributionId: attributionId)
+                logger.info("match() SUCCESS — attribution_id=\(attributionId, privacy: .public)")
             } else {
                 store.storeUnmatched()
+                logger.info("match() no match found")
             }
 
             store.markChecked()
