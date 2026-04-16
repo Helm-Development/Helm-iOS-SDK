@@ -35,14 +35,16 @@ internal struct DeviceSignals {
         let loc = regionCode.isEmpty ? langCode : "\(langCode)-\(regionCode)"
 
         // Safari UA reports the marketing iOS version (e.g. "18.7"), not the
-        // internal Darwin version (e.g. "26.4"). We must match what the JS
-        // interstitial collects from the UA string.
-        #if canImport(UIKit)
-        let osVer = UIDevice.current.systemVersion  // "18.7" marketing version
-        #else
-        let v = ProcessInfo.processInfo.operatingSystemVersion
-        let osVer = "\(v.majorVersion).\(v.minorVersion)"
-        #endif
+        // internal Darwin version (e.g. "26.4"). operatingSystemVersionString
+        // contains the marketing version: "Version 18.7 (Build 22H123)"
+        let versionStr = ProcessInfo.processInfo.operatingSystemVersionString
+        let osVer: String
+        if let range = versionStr.range(of: #"(\d+\.\d+)"#, options: .regularExpression) {
+            osVer = String(versionStr[range])
+        } else {
+            let v = ProcessInfo.processInfo.operatingSystemVersion
+            osVer = "\(v.majorVersion).\(v.minorVersion)"
+        }
 
         return DeviceSignals(
             screenWidth: width,
