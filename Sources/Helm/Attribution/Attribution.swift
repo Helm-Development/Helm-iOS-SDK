@@ -33,11 +33,12 @@ public final class Attribution {
 
         do {
             let deviceId = store.deviceId
-            logger.info("match() starting — device_id=\(deviceId, privacy: .public)")
+            let signals = await DeviceSignals.collect()
 
-            let body: [String: Any] = [
-                "device_id": deviceId
-            ]
+            logger.info("match() starting — device_id=\(deviceId, privacy: .public) signals=\(signals.screenWidth)x\(signals.screenHeight)")
+
+            var body = signals.toDict()
+            body["device_id"] = deviceId
 
             let response = try await HelmHTTPClient.post(
                 path: "/attribution/match/",
@@ -58,7 +59,6 @@ public final class Attribution {
             store.markChecked()
         } catch {
             logger.error("Attribution match failed: \(error.localizedDescription, privacy: .public)")
-            // Do NOT mark as checked so we retry on next launch.
         }
     }
 
