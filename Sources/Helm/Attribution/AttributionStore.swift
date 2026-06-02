@@ -1,7 +1,7 @@
 import Foundation
 
 /// Persists attribution state in UserDefaults.
-internal final class AttributionStore {
+internal final class AttributionStore: @unchecked Sendable {
 
     private enum Keys {
         static let checked = "helm_attribution_checked"
@@ -10,6 +10,10 @@ internal final class AttributionStore {
     }
 
     private let defaults: UserDefaults
+
+    /// Serializes the device-id read-modify-write so two concurrent first-launch
+    /// callers cannot each see a nil value and write a different UUID.
+    private let deviceIdLock = NSLock()
 
     /// Initialize with an explicit UserDefaults suite (useful for testing).
     init(defaults: UserDefaults = .standard) {
@@ -54,7 +58,13 @@ internal final class AttributionStore {
     // MARK: - Device ID
 
     /// A stable device identifier (random UUID, generated once per install).
+    ///
+    /// Serialized via `deviceIdLock` so that concurrent first-launch readers
+    /// observe a single generated UUID rather than racing to write different
+    /// values to UserDefaults.
     var deviceId: String {
+        deviceIdLock.lock()
+        defer { deviceIdLock.unlock() }
         if let existing = defaults.string(forKey: Keys.deviceId), !existing.isEmpty {
             return existing
         }

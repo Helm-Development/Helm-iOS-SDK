@@ -4,7 +4,7 @@ import os
 private let logger = Logger(subsystem: "dev.helmcode.helm", category: "attribution")
 
 /// Handles attribution matching and event tracking for Helm.
-public final class Attribution {
+public final class Attribution: @unchecked Sendable {
 
     internal static let shared = Attribution()
 
@@ -45,12 +45,12 @@ public final class Attribution {
                 body: body
             )
 
-            logger.info("match() response: \(response, privacy: .public)")
+            logger.info("match() response: \(response, privacy: .private)")
 
             if let matched = response["matched"] as? Bool, matched {
                 let attributionId = response["attribution_id"] as? String ?? ""
                 store.storeMatch(attributionId: attributionId)
-                logger.info("match() SUCCESS — attribution_id=\(attributionId, privacy: .public)")
+                logger.info("match() SUCCESS — attribution_id=\(attributionId, privacy: .private)")
             } else {
                 store.storeUnmatched()
                 logger.info("match() no match found")
@@ -70,12 +70,24 @@ public final class Attribution {
     ///   - eventType: The event name (e.g. "signup", "purchase").
     ///   - metadata: Optional key-value metadata attached to the event.
     public func increment(_ eventType: String, metadata: [String: Any]? = nil) {
+        // Serialize metadata to JSON `Data` here so we cross the Task
+        // boundary with a Sendable value. `[String: Any]` is not Sendable,
+        // but `Data` is, and the caller's dictionary is treated as immutable
+        // after this point.
+        let metadataData: Data?
+        if let metadata = metadata,
+           let data = try? JSONSerialization.data(withJSONObject: metadata) {
+            metadataData = data
+        } else {
+            metadataData = nil
+        }
+
         Task {
-            await _increment(eventType, metadata: metadata)
+            await _increment(eventType, metadataData: metadataData)
         }
     }
 
-    private func _increment(_ eventType: String, metadata: [String: Any]?) async {
+    private func _increment(_ eventType: String, metadataData: Data?) async {
         do {
             let rawId = store.rawAttributionId
 
@@ -90,7 +102,8 @@ public final class Attribution {
                 body["attribution_id"] = rawId
             }
 
-            if let metadata = metadata {
+            if let metadataData = metadataData,
+               let metadata = try? JSONSerialization.jsonObject(with: metadataData) as? [String: Any] {
                 body["metadata"] = metadata
             }
 

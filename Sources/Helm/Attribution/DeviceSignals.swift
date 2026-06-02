@@ -4,7 +4,7 @@ import UIKit
 import Foundation
 
 /// Collects device signals for probabilistic fingerprint matching.
-internal struct DeviceSignals {
+internal struct DeviceSignals: Sendable {
     let screenWidth: Int
     let screenHeight: Int
     let devicePixelRatio: Double

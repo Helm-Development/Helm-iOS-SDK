@@ -1,7 +1,7 @@
 import Foundation
 
 /// Errors produced by the Helm SDK networking layer.
-internal enum HelmError: Error, LocalizedError {
+internal enum HelmError: Error, LocalizedError, @unchecked Sendable {
 
     /// `Helm.configure(...)` was not called before making API requests.
     case notConfigured
@@ -15,6 +15,14 @@ internal enum HelmError: Error, LocalizedError {
     /// The server returned a non-2xx status code.
     case serverError(Int, String)
 
+    /// Failed to encode the request body as JSON.
+    case encodingFailed(Error)
+
+    /// The request body contained values that are not valid JSON
+    /// (e.g. `Double.infinity`, non-string keys). Surfaced as the
+    /// underlying error in `.encodingFailed`.
+    case invalidJSONBody
+
     var errorDescription: String? {
         switch self {
         case .notConfigured:
@@ -25,6 +33,10 @@ internal enum HelmError: Error, LocalizedError {
             return "Invalid response from server."
         case .serverError(let code, let body):
             return "Server error \(code): \(body)"
+        case .encodingFailed(let underlying):
+            return "Failed to encode request body: \(underlying.localizedDescription)"
+        case .invalidJSONBody:
+            return "Request body is not a valid JSON object."
         }
     }
 }

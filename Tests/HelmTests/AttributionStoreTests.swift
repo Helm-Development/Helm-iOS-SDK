@@ -70,4 +70,39 @@ final class AttributionStoreTests: XCTestCase {
         let store2 = AttributionStore(defaults: defaults)
         XCTAssertEqual(store2.deviceId, firstId, "deviceId should persist across store instances")
     }
+
+    // MARK: - HELM-185: Thread-safety stress test
+
+    /// Verifies that concurrent first-launch reads of `deviceId` never race
+    /// to write different UUIDs. Without the lock, two tasks can each see
+    /// `nil` and produce distinct IDs, leaving whichever wrote last in
+    /// UserDefaults while the other caller has already returned a stale value.
+    func test_device_id_concurrent_first_launch_returns_same_id() async {
+        // Drain any default-write that may have happened in setUp.
+        defaults.removeObject(forKey: "helm_device_id")
+
+        let concurrentReads = 64
+        let ids = await withTaskGroup(of: String.self) { group -> [String] in
+            for _ in 0..<concurrentReads {
+                group.addTask { [store] in
+                    return store!.deviceId
+                }
+            }
+            var collected: [String] = []
+            for await id in group {
+                collected.append(id)
+            }
+            return collected
+        }
+
+        XCTAssertEqual(ids.count, concurrentReads)
+        let unique = Set(ids)
+        XCTAssertEqual(unique.count, 1,
+                       "All concurrent deviceId reads must return the same UUID; got \(unique.count) distinct values")
+
+        // The single ID must match what's persisted in UserDefaults.
+        let persisted = defaults.string(forKey: "helm_device_id")
+        XCTAssertNotNil(persisted)
+        XCTAssertEqual(unique.first, persisted)
+    }
 }
