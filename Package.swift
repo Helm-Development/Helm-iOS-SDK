@@ -5,8 +5,7 @@ import PackageDescription
 let package = Package(
     name: "Helm",
     platforms: [
-        .iOS(.v15),
-        .macOS(.v12)
+        .iOS(.v15)
     ],
     products: [
         .library(
@@ -17,7 +16,10 @@ let package = Package(
     targets: [
         .target(
             name: "Helm",
-            path: "Sources/Helm"
+            path: "Sources/Helm",
+            resources: [
+                .copy("PrivacyInfo.xcprivacy")
+            ]
         ),
         .testTarget(
             name: "HelmTests",
