@@ -71,6 +71,72 @@ final class AttributionStoreTests: XCTestCase {
         XCTAssertEqual(store2.deviceId, firstId, "deviceId should persist across store instances")
     }
 
+    // MARK: - HELM-184: Bounded retry budget
+
+    func test_can_retry_true_on_fresh_install() {
+        XCTAssertTrue(store.canRetry)
+        XCTAssertEqual(store.attemptCount, 0)
+    }
+
+    func test_can_retry_flips_false_after_max_attempts() {
+        for _ in 0 ..< AttributionStore.maxAttempts {
+            store.recordFailedAttempt()
+        }
+        XCTAssertEqual(store.attemptCount, AttributionStore.maxAttempts)
+        XCTAssertFalse(store.canRetry)
+    }
+
+    func test_can_retry_still_true_below_max_attempts() {
+        store.recordFailedAttempt()
+        store.recordFailedAttempt()
+        XCTAssertEqual(store.attemptCount, 2)
+        XCTAssertTrue(store.canRetry)
+    }
+
+    func test_reset_retry_budget_clears_attempts() {
+        store.recordFailedAttempt()
+        store.recordFailedAttempt()
+        store.recordFailedAttempt()
+        XCTAssertEqual(store.attemptCount, 3)
+
+        store.resetRetryBudget()
+
+        XCTAssertEqual(store.attemptCount, 0)
+        XCTAssertTrue(store.canRetry)
+    }
+
+    /// Once five failures have stacked up, `canRetry` is false and a
+    /// caller (Attribution._match) is expected to flip `hasChecked` to
+    /// true. Verified end-to-end by `Attribution`-level tests.
+    func test_record_failed_attempt_increments_counter() {
+        XCTAssertEqual(store.attemptCount, 0)
+        store.recordFailedAttempt()
+        XCTAssertEqual(store.attemptCount, 1)
+        store.recordFailedAttempt()
+        XCTAssertEqual(store.attemptCount, 2)
+    }
+
+    // MARK: - HELM-189: clearAll resets every key
+
+    func test_clear_all_removes_every_key() {
+        store.storeMatch(attributionId: UUID().uuidString)
+        store.markChecked()
+        store.recordFailedAttempt()
+        let originalDeviceId = store.deviceId
+
+        store.clearAll()
+
+        XCTAssertFalse(store.hasChecked)
+        XCTAssertNil(store.attributionId)
+        XCTAssertEqual(store.rawAttributionId, "")
+        XCTAssertEqual(store.attemptCount, 0)
+        XCTAssertTrue(store.canRetry)
+
+        // Next read regenerates a fresh device id.
+        let newDeviceId = store.deviceId
+        XCTAssertNotEqual(newDeviceId, originalDeviceId)
+    }
+
     // MARK: - HELM-185: Thread-safety stress test
 
     /// Verifies that concurrent first-launch reads of `deviceId` never race

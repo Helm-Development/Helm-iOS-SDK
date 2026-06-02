@@ -63,6 +63,47 @@ final class HelmHTTPClientTests: XCTestCase {
         }
     }
 
+    // MARK: - HELM-183: Final URL matches the backend route
+
+    /// With the canonical `baseURL: "https://helmcode.dev"`, posting to the
+    /// attribution-match path must produce a fully-qualified URL ending in
+    /// `/api/client/v1/attribution/match/`. The SDK is responsible for
+    /// prepending the `/api/client/v1` prefix; integrators pass only the host.
+    func test_post_url_ends_with_api_client_v1_attribution_match() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        MockURLProtocol.responder = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, #"{"matched":false}"#.data(using: .utf8)!)
+        }
+
+        Helm.configure(
+            publishableKey: "test-key",
+            baseURL: "https://helmcode.dev",
+            session: session
+        )
+
+        _ = try await HelmHTTPClient.post(
+            path: "/api/client/v1/attribution/match/",
+            body: ["device_id": "abc"]
+        )
+
+        XCTAssertEqual(MockURLProtocol.receivedRequests.count, 1)
+        let urlString = MockURLProtocol.receivedRequests[0].url?.absoluteString ?? ""
+        XCTAssertTrue(
+            urlString.hasSuffix("/api/client/v1/attribution/match/"),
+            "Final URL must end with /api/client/v1/attribution/match/, got: \(urlString)"
+        )
+        XCTAssertEqual(urlString, "https://helmcode.dev/api/client/v1/attribution/match/")
+    }
+
     // MARK: - HELM-191: Injected URLSession is used for requests
 
     /// A `URLSession` configured with a custom `URLProtocol` subclass and

@@ -8,9 +8,37 @@ public final class Attribution: @unchecked Sendable {
 
     internal static let shared = Attribution()
 
-    private let store = AttributionStore()
+    private let store: AttributionStore
 
-    private init() {}
+    // HELM-187: event queue + match-in-flight flag.
+    //
+    // The queue stores already-encoded entries (event_type + serialized
+    // metadata) so each pending event is `Sendable`-safe. It's bounded at
+    // `maxPendingEvents`; the oldest entry drops on overflow so a stuck
+    // match can't grow the queue without bound.
+    private let queueLock = NSLock()
+    private var pendingEvents: [PendingEvent] = []
+    private var matchInFlight: Bool = false
+    private static let maxPendingEvents: Int = 100
+
+    /// A queued event waiting for `match()` to resolve. Stored as
+    /// already-encoded JSON `Data` for the metadata so the entry crosses
+    /// Task / strict-concurrency boundaries cleanly.
+    private struct PendingEvent: Sendable {
+        let eventType: String
+        let metadataData: Data?
+    }
+
+    private init() {
+        self.store = AttributionStore()
+    }
+
+    /// Internal initializer for tests. Allows injecting an `AttributionStore`
+    /// backed by a non-`.standard` UserDefaults suite so suites don't
+    /// pollute each other.
+    internal init(store: AttributionStore) {
+        self.store = store
+    }
 
     // MARK: - Match
 
@@ -25,11 +53,28 @@ public final class Attribution: @unchecked Sendable {
         }
     }
 
-    private func _match() async {
+    /// Async variant of `match()`. Internal so tests can `await` the
+    /// completion of a single match cycle. The public `match()` keeps the
+    /// fire-and-forget shape integrators rely on.
+    internal func _match() async {
         guard !store.hasChecked else {
             logger.info("match() skipped — already checked")
             return
         }
+
+        // HELM-184: respect the bounded retry budget. Once exhausted, mark
+        // checked so we stop hitting the server on every launch.
+        guard store.canRetry else {
+            logger.info("match() skipped — retry budget exhausted")
+            store.markChecked()
+            return
+        }
+
+        // HELM-187: any increment() calls that arrive between now and the
+        // end of this method get queued so they can pick up the resolved
+        // attribution_id (or null) instead of posting with no context.
+        setMatchInFlight(true)
+        defer { setMatchInFlight(false) }
 
         do {
             let deviceId = store.deviceId
@@ -41,7 +86,7 @@ public final class Attribution: @unchecked Sendable {
             body["device_id"] = deviceId
 
             let response = try await HelmHTTPClient.post(
-                path: "/attribution/match/",
+                path: "/api/client/v1/attribution/match/",
                 body: body
             )
 
@@ -57,8 +102,16 @@ public final class Attribution: @unchecked Sendable {
             }
 
             store.markChecked()
+            store.resetRetryBudget()
+            await flushPendingEvents()
         } catch {
             logger.error("Attribution match failed: \(error.localizedDescription, privacy: .public)")
+            store.recordFailedAttempt()
+            if !store.canRetry {
+                logger.info("match() retry budget exhausted — marking checked")
+                store.markChecked()
+                await flushPendingEvents()
+            }
         }
     }
 
@@ -81,6 +134,21 @@ public final class Attribution: @unchecked Sendable {
         } else {
             metadataData = nil
         }
+
+        // HELM-187: if a match is in flight, queue the event so it picks
+        // up the resolved attribution_id (or null) once the match returns.
+        // Otherwise fire immediately as before.
+        queueLock.lock()
+        if matchInFlight {
+            pendingEvents.append(PendingEvent(eventType: eventType, metadataData: metadataData))
+            if pendingEvents.count > Self.maxPendingEvents {
+                // Drop the oldest entry so the queue stays bounded.
+                pendingEvents.removeFirst(pendingEvents.count - Self.maxPendingEvents)
+            }
+            queueLock.unlock()
+            return
+        }
+        queueLock.unlock()
 
         Task {
             await _increment(eventType, metadataData: metadataData)
@@ -108,12 +176,80 @@ public final class Attribution: @unchecked Sendable {
             }
 
             _ = try await HelmHTTPClient.post(
-                path: "/attribution/event/",
+                path: "/api/client/v1/attribution/event/",
                 body: body
             )
         } catch {
             logger.error("Attribution increment failed: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// Drain the pending-event queue, posting each event with the now-resolved
+    /// attribution context. Called from `_match()` once the SDK has a final
+    /// attribution decision (success path or budget-exhausted failure path).
+    private func flushPendingEvents() async {
+        let drained = drainPendingEvents()
+        for entry in drained {
+            await _increment(entry.eventType, metadataData: entry.metadataData)
+        }
+    }
+
+    /// Drain the queue under the lock and return its contents. Kept
+    /// synchronous so the `NSLock` lock/unlock pair never spans an `await`
+    /// suspension point (Swift 6 forbids `NSLock.unlock` from async
+    /// contexts).
+    private func drainPendingEvents() -> [PendingEvent] {
+        queueLock.lock()
+        defer { queueLock.unlock() }
+        let drained = pendingEvents
+        pendingEvents.removeAll()
+        return drained
+    }
+
+    /// Set the match-in-flight flag under the lock. Synchronous for the
+    /// same Swift 6 reason as `drainPendingEvents()`.
+    private func setMatchInFlight(_ value: Bool) {
+        queueLock.lock()
+        defer { queueLock.unlock() }
+        matchInFlight = value
+    }
+
+    // MARK: - Test Hooks
+
+    /// Internal accessor for tests that need to observe the in-flight flag.
+    internal var testHook_isMatchInFlight: Bool {
+        queueLock.lock()
+        defer { queueLock.unlock() }
+        return matchInFlight
+    }
+
+    /// Internal accessor for tests that need to observe queue depth.
+    internal var testHook_pendingEventCount: Int {
+        queueLock.lock()
+        defer { queueLock.unlock() }
+        return pendingEvents.count
+    }
+
+    // MARK: - Reset
+
+    /// Reset all SDK attribution state so the next `match()` runs as if this
+    /// were a fresh install: a new `device_id` is generated, `hasChecked`
+    /// flips back to false, the stored `attribution_id` is cleared, the
+    /// retry budget is cleared, and any pending events queued by HELM-187
+    /// are dropped.
+    ///
+    /// Call this when the host app logs the user out and a different user
+    /// logs in on the same device, or when an account-deletion flow needs
+    /// to remove SDK-stored identifiers (App Review Guideline 5.1.1(v)).
+    public func reset() {
+        // Drop any queued events and clear the match-in-flight flag so a
+        // post-reset `match()` starts cleanly.
+        queueLock.lock()
+        pendingEvents.removeAll()
+        matchInFlight = false
+        queueLock.unlock()
+
+        store.clearAll()
     }
 
     // MARK: - Authenticated Events

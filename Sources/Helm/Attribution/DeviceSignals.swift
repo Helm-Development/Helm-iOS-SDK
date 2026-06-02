@@ -30,8 +30,18 @@ internal struct DeviceSignals: Sendable {
         let tz = TimeZone.current.identifier
 
         // Match navigator.language format: "en-US" not just "en"
-        let langCode = Locale.current.languageCode ?? "en"
-        let regionCode = Locale.current.regionCode ?? ""
+        // iOS 16 / macOS 13 deprecated the bare `languageCode` / `regionCode`
+        // accessors in favor of the structured `Locale.Language` / region
+        // identifiers. Both paths preserve the existing "en-US" output shape.
+        let langCode: String
+        let regionCode: String
+        if #available(iOS 16, macOS 13, *) {
+            langCode = Locale.current.language.languageCode?.identifier ?? "en"
+            regionCode = Locale.current.region?.identifier ?? ""
+        } else {
+            langCode = Locale.current.languageCode ?? "en"
+            regionCode = Locale.current.regionCode ?? ""
+        }
         let loc = regionCode.isEmpty ? langCode : "\(langCode)-\(regionCode)"
 
         // Safari UA reports the marketing iOS version (e.g. "18.7"), not the
