@@ -45,4 +45,10 @@ public enum Helm {
     public static var attribution: Attribution {
         Attribution.shared
     }
+
+    /// Access product analytics features. Call `Helm.analytics.start()` after
+    /// `configure` to begin installation/session/event tracking.
+    public static var analytics: Analytics {
+        Analytics.shared
+    }
 }
