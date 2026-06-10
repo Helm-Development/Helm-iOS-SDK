@@ -5,7 +5,8 @@ import PackageDescription
 let package = Package(
     name: "Helm",
     platforms: [
-        .iOS(.v15)
+        .iOS(.v15),
+        .macOS(.v12),
     ],
     products: [
         .library(
