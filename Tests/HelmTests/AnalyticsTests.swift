@@ -55,6 +55,14 @@ final class AnalyticsTests: XCTestCase {
         XCTAssertEqual(analytics.queuedEventCount, 1)
     }
 
+    func testStartTwiceIsIdempotent() {
+        let analytics = makeAnalytics()
+        analytics.start()
+        analytics.start() // must not crash, must not double-queue
+        analytics.track("once")
+        XCTAssertEqual(analytics.queuedEventCount, 1)
+    }
+
     func testHelmFacadeExposesAnalytics() {
         XCTAssertTrue(Helm.analytics === Analytics.shared)
     }

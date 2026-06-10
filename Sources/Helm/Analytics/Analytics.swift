@@ -18,16 +18,18 @@ private let logger = Logger(subsystem: "dev.helmcode.helm", category: "analytics
 /// // in your API client:
 /// Helm.analytics.headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
 /// ```
-public final class Analytics {
+public final class Analytics: @unchecked Sendable {
 
-    public static let shared = Analytics()
+    internal static let shared = Analytics()
 
     private let installationStore: InstallationStore
     private let identityStore: IdentityStore
     private let sessionManager: SessionManager
     private let queue: EventQueue
+    private let stateLock = NSLock()
     private var started = false
     private var flushTimer: DispatchSourceTimer?
+    private var observerTokens: [NSObjectProtocol] = []
     private static let flushInterval: TimeInterval = 30
 
     internal init(installationStore: InstallationStore = InstallationStore(),
@@ -40,6 +42,11 @@ public final class Analytics {
         self.queue = queue
     }
 
+    deinit {
+        observerTokens.forEach(NotificationCenter.default.removeObserver(_:))
+        flushTimer?.cancel()
+    }
+
     // MARK: - Public API
 
     /// Activates analytics: registers the installation with Helm and begins
@@ -49,8 +56,14 @@ public final class Analytics {
             logger.warning("start() before Helm.configure(...) — ignored")
             return
         }
-        guard !started else { return }
+        // Check-and-set under the lock so concurrent double-start is impossible.
+        stateLock.lock()
+        if started {
+            stateLock.unlock()
+            return
+        }
         started = true
+        stateLock.unlock()
         observeLifecycle()
         startFlushTimer()
         register()
@@ -59,7 +72,7 @@ public final class Analytics {
     /// Bind the user identity from the login response's `helm_user_hash`.
     public func identify(userHash: String) {
         identityStore.store(userHash: userHash)
-        if started { register() } // re-registration binds the hash server-side
+        if isStarted { register() } // re-registration binds the hash server-side
     }
 
     /// Drop the identity on logout. The installation stays bound server-side
@@ -70,7 +83,7 @@ public final class Analytics {
 
     /// Queue a custom event. Flushes automatically at 50 events / 30 s / background.
     public func track(_ name: String, properties: [String: Any] = [:]) {
-        guard started else {
+        guard isStarted else {
             logger.warning("track(\"\(name, privacy: .public)\") before start() — dropped")
             return
         }
@@ -106,6 +119,11 @@ public final class Analytics {
 
     /// Test hook: current queue depth.
     internal var queuedEventCount: Int { queue.count }
+
+    private var isStarted: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return started
+    }
 
     private func register() {
         let installationId = installationStore.installationId
@@ -155,24 +173,27 @@ public final class Analytics {
         timer.schedule(deadline: .now() + Self.flushInterval, repeating: Self.flushInterval)
         timer.setEventHandler { [weak self] in self?.flush() }
         timer.resume()
+        stateLock.lock()
         flushTimer = timer
+        stateLock.unlock()
     }
 
     private func observeLifecycle() {
         #if canImport(UIKit) && os(iOS)
-        NotificationCenter.default.addObserver(
+        let background = NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
             self?.sessionManager.appDidEnterBackground()
             self?.flush() // flush-on-background durability (spec §2)
         }
-        NotificationCenter.default.addObserver(
+        let foreground = NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
             self?.sessionManager.appWillEnterForeground()
         }
+        observerTokens.append(contentsOf: [background, foreground])
         #endif
     }
 }

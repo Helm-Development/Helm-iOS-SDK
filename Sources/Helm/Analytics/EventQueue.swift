@@ -10,13 +10,14 @@ internal struct AnalyticsEvent {
     /// are dropped rather than re-queued a second time (spec §6).
     var retried: Bool = false
 
-    private static let iso8601 = ISO8601DateFormatter()
-
     /// The JSON shape `POST /api/v1/analytics/events/` expects per event.
     func payload() -> [String: Any] {
-        [
+        // ISO8601DateFormatter is not thread-safe; create per call rather
+        // than sharing a static instance across threads.
+        let iso8601 = ISO8601DateFormatter()
+        return [
             "event_name": eventName,
-            "occurred_at": Self.iso8601.string(from: occurredAt),
+            "occurred_at": iso8601.string(from: occurredAt),
             "session_id": sessionId,
             "properties": properties,
         ]
