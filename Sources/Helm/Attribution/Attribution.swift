@@ -12,6 +12,10 @@ public final class Attribution: @unchecked Sendable {
     /// Source of the unified device identity (Keychain installation id).
     /// Injected so tests can supply a fixed id without Keychain access.
     private let installationId: () -> String
+    /// Source of the bound user identity. Returns `nil` when anonymous.
+    /// Injected so tests can supply a fixed hash without touching `.standard`
+    /// UserDefaults or `Analytics.shared`.
+    private let userHash: () -> String?
 
     // HELM-187: event queue + match-in-flight flag.
     //
@@ -27,24 +31,33 @@ public final class Attribution: @unchecked Sendable {
     /// A queued event waiting for `match()` to resolve. Stored as
     /// already-encoded JSON `Data` for the metadata so the entry crosses
     /// Task / strict-concurrency boundaries cleanly.
+    ///
+    /// `userHash` is non-nil only for `incrementAuthenticated` events; plain
+    /// `increment` events always carry `nil` so `user_hash` is never added to
+    /// their request bodies.
     private struct PendingEvent: Sendable {
         let eventType: String
         let metadataData: Data?
+        let userHash: String?
     }
 
     private init() {
         self.store = AttributionStore()
         self.installationId = { Analytics.shared.installationIdValue }
+        self.userHash = { Analytics.shared.currentUserHash }
     }
 
     /// Internal initializer for tests. Allows injecting an `AttributionStore`
     /// backed by a non-`.standard` UserDefaults suite so suites don't
-    /// pollute each other, and an `installationId` closure to avoid Keychain
-    /// access in unit tests.
+    /// pollute each other, an `installationId` closure to avoid Keychain
+    /// access in unit tests, and a `userHash` closure to control identity
+    /// without writing to `.standard` UserDefaults.
     internal init(store: AttributionStore,
-                  installationId: @escaping () -> String = { Analytics.shared.installationIdValue }) {
+                  installationId: @escaping () -> String = { Analytics.shared.installationIdValue },
+                  userHash: @escaping () -> String? = { Analytics.shared.currentUserHash }) {
         self.store = store
         self.installationId = installationId
+        self.userHash = userHash
     }
 
     // MARK: - Match
@@ -150,7 +163,7 @@ public final class Attribution: @unchecked Sendable {
         // Otherwise fire immediately as before.
         queueLock.lock()
         if matchInFlight {
-            pendingEvents.append(PendingEvent(eventType: eventType, metadataData: metadataData))
+            pendingEvents.append(PendingEvent(eventType: eventType, metadataData: metadataData, userHash: nil))
             if pendingEvents.count > Self.maxPendingEvents {
                 // Drop the oldest entry so the queue stays bounded.
                 pendingEvents.removeFirst(pendingEvents.count - Self.maxPendingEvents)
@@ -161,11 +174,58 @@ public final class Attribution: @unchecked Sendable {
         queueLock.unlock()
 
         Task {
-            await _increment(eventType, metadataData: metadataData)
+            await _increment(eventType, metadataData: metadataData, userHash: nil)
         }
     }
 
-    private func _increment(_ eventType: String, metadataData: Data?) async {
+    /// Record an attribution event tied to the authenticated user identity
+    /// (fire-and-forget).
+    ///
+    /// Mirrors `increment()` but attaches `user_hash` to the event body so the
+    /// server can associate the event with a known user when the endpoint gains
+    /// first-party identity support. The `user_hash` is read from the value
+    /// stored by `Analytics.identify(userHash:)` at call time; if no user is
+    /// identified the method behaves identically to `increment()`.
+    ///
+    /// > **Server note:** the attribution-event endpoint does not yet consume
+    /// > `user_hash` directly — identity is already associated at the
+    /// > installation level via `identify()` → register. The field is included
+    /// > for forward-compatibility and parity with the Android SDK; server-side
+    /// > consumption is a follow-up task.
+    ///
+    /// - Parameters:
+    ///   - eventType: The event name (e.g. "purchase", "trial_start").
+    ///   - metadata: Optional key-value metadata attached to the event.
+    public func incrementAuthenticated(_ eventType: String, metadata: [String: Any]? = nil) {
+        let metadataData: Data?
+        if let metadata = metadata,
+           let data = try? JSONSerialization.data(withJSONObject: metadata) {
+            metadataData = data
+        } else {
+            metadataData = nil
+        }
+
+        // Capture the user hash at call time (not at flush time) so the
+        // identity snapshot is consistent with the event's logical moment.
+        let hash = userHash()
+
+        queueLock.lock()
+        if matchInFlight {
+            pendingEvents.append(PendingEvent(eventType: eventType, metadataData: metadataData, userHash: hash))
+            if pendingEvents.count > Self.maxPendingEvents {
+                pendingEvents.removeFirst(pendingEvents.count - Self.maxPendingEvents)
+            }
+            queueLock.unlock()
+            return
+        }
+        queueLock.unlock()
+
+        Task {
+            await _increment(eventType, metadataData: metadataData, userHash: hash)
+        }
+    }
+
+    private func _increment(_ eventType: String, metadataData: Data?, userHash: String?) async {
         do {
             let rawId = store.rawAttributionId
 
@@ -185,6 +245,12 @@ public final class Attribution: @unchecked Sendable {
                 body["metadata"] = metadata
             }
 
+            // Include user_hash only for authenticated events (non-nil hash).
+            // Plain increment() always passes nil so user_hash is never sent.
+            if let userHash = userHash {
+                body["user_hash"] = userHash
+            }
+
             _ = try await HelmHTTPClient.post(
                 path: APIPath.attributionEvent,
                 body: body
@@ -200,7 +266,7 @@ public final class Attribution: @unchecked Sendable {
     private func flushPendingEvents() async {
         let drained = drainPendingEvents()
         for entry in drained {
-            await _increment(entry.eventType, metadataData: entry.metadataData)
+            await _increment(entry.eventType, metadataData: entry.metadataData, userHash: entry.userHash)
         }
     }
 
@@ -262,9 +328,4 @@ public final class Attribution: @unchecked Sendable {
         store.clearAll()
     }
 
-    // MARK: - Authenticated Events
-
-    // TODO: incrementAuthenticated — not implemented in v1.
-    // This will allow sending events tied to an authenticated user identity
-    // (e.g. after login) in addition to the device-level attribution.
 }

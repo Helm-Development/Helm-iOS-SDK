@@ -145,6 +145,10 @@ public final class Analytics: @unchecked Sendable {
     /// can use it as the unified `device_id` instead of the old UserDefaults UUID.
     internal var installationIdValue: String { installationStore.installationId }
 
+    /// The stored user hash, or `nil` when anonymous. Exposed internally so
+    /// `Attribution.incrementAuthenticated` can attach identity to event bodies.
+    internal var currentUserHash: String? { identityStore.userHash }
+
     /// Test hook: current attribution token (nil if none set).
     internal var testHook_attributionToken: String? {
         stateLock.lock(); defer { stateLock.unlock() }
