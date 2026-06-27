@@ -102,6 +102,9 @@ public final class Attribution: @unchecked Sendable {
             if let matched = response["matched"] as? Bool, matched {
                 let attributionId = response["attribution_id"] as? String ?? ""
                 store.storeMatch(attributionId: attributionId)
+                // Forward the token to analytics so the next registration carries
+                // attribution_token and the server closes the pairing (HELM-203 #1b).
+                Analytics.shared.onAttributionMatched(attributionId)
                 logger.info("match() SUCCESS — attribution_id=\(attributionId, privacy: .private)")
             } else {
                 store.storeUnmatched()

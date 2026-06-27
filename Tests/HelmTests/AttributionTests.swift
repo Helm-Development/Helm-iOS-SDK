@@ -29,6 +29,8 @@ final class AttributionTests: XCTestCase {
         attribution = nil
         Configuration.shared = nil
         AttributionMockURLProtocol.reset()
+        // Clear any token written on Analytics.shared by the handshake tests.
+        Analytics.shared.testHook_clearAttributionToken()
         super.tearDown()
     }
 
@@ -261,6 +263,24 @@ final class AttributionTests: XCTestCase {
 
         XCTAssertEqual(capturedDeviceId, expectedId,
                        "match() must send the Keychain installation id as device_id")
+    }
+
+    // MARK: - HELM-203 #1b: attribution_token handshake
+
+    /// A successful `_match()` must forward the resolved `attribution_id` to
+    /// `Analytics.shared` via `onAttributionMatched`. Verified by reading the
+    /// test hook on the shared singleton (Analytics is not started here so the
+    /// re-registration branch is not triggered — that path is covered in
+    /// `AnalyticsTests.testOnAttributionMatchedWhileStartedTriggersReRegistrationWithToken`).
+    func test_match_success_forwards_attribution_id_to_analytics() async {
+        let expectedId = "attr-forwarded-helm203"
+
+        configureSDK { _ in Self.successResponse(matched: true, attributionId: expectedId) }
+
+        await attribution._match()
+
+        XCTAssertEqual(Analytics.shared.testHook_attributionToken, expectedId,
+                       "Successful _match() must forward attribution_id to Analytics.shared via onAttributionMatched")
     }
 
     // MARK: - HELM-195: isConfigured and re-config warning

@@ -7,21 +7,66 @@ final class AnalyticsTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        defaults = UserDefaults(suiteName: "AnalyticsTests")!
-        defaults.removePersistentDomain(forName: "AnalyticsTests")
+        let suiteName = "dev.helmcode.helm.tests.analytics.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
         Configuration.shared = Configuration(publishableKey: "pk_test", baseURL: "https://example.invalid")
+        AnalyticsMockURLProtocol.reset()
     }
 
     override func tearDown() {
         Configuration.shared = nil
+        AnalyticsMockURLProtocol.reset()
+        // Clear any token set on the shared singleton by attribution-handshake tests.
+        Analytics.shared.testHook_clearAttributionToken()
         super.tearDown()
     }
 
-    private func makeAnalytics() -> Analytics {
+    private func makeAnalytics(attributionStore: AttributionStore? = nil) -> Analytics {
         Analytics(installationStore: InstallationStore(defaults: defaults, useKeychain: false),
                   identityStore: IdentityStore(defaults: defaults),
                   sessionManager: SessionManager(),
-                  queue: EventQueue())
+                  queue: EventQueue(),
+                  attributionStore: attributionStore ?? AttributionStore(defaults: defaults))
+    }
+
+    // MARK: - Helpers
+
+    private func configureWithMockSession() {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AnalyticsMockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        AnalyticsMockURLProtocol.responder = { request in
+            let body = try! JSONSerialization.data(withJSONObject: ["ok": true])
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, body)
+        }
+        Helm.configure(publishableKey: "pk_test", baseURL: "https://example.invalid", session: session)
+    }
+
+    private func bodyFromRequest(_ request: URLRequest) -> [String: Any]? {
+        if let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            let bufferSize = 1024
+            var buffer = [UInt8](repeating: 0, count: bufferSize)
+            while stream.hasBytesAvailable {
+                let read = stream.read(&buffer, maxLength: bufferSize)
+                if read <= 0 { break }
+                data.append(buffer, count: read)
+            }
+            return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        }
+        if let body = request.httpBody {
+            return (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+        }
+        return nil
     }
 
     func testHeadersWhenAnonymous() {
@@ -66,4 +111,109 @@ final class AnalyticsTests: XCTestCase {
     func testHelmFacadeExposesAnalytics() {
         XCTAssertTrue(Helm.analytics === Analytics.shared)
     }
+
+    // MARK: - HELM-203 #1b: attribution_token handshake
+
+    /// `onAttributionMatched` while analytics is started must trigger a
+    /// re-registration whose captured request body carries `attribution_token`.
+    func testOnAttributionMatchedWhileStartedTriggersReRegistrationWithToken() async throws {
+        configureWithMockSession()
+        let analytics = makeAnalytics()
+
+        // Start: fires the initial registration (we don't care about its body here).
+        analytics.start()
+
+        // Wait for the initial registration request to arrive.
+        for _ in 0..<100 {
+            try await Task.sleep(nanoseconds: 10_000_000) // 10 ms
+            if !AnalyticsMockURLProtocol.receivedRequests.isEmpty { break }
+        }
+        let countAfterStart = AnalyticsMockURLProtocol.receivedRequests.count
+        XCTAssertGreaterThan(countAfterStart, 0, "start() must trigger a registration")
+
+        // Trigger the handshake.
+        analytics.onAttributionMatched("attr-token-xyz")
+
+        // Wait for the re-registration.
+        for _ in 0..<100 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            if AnalyticsMockURLProtocol.receivedRequests.count > countAfterStart { break }
+        }
+
+        XCTAssertGreaterThan(AnalyticsMockURLProtocol.receivedRequests.count, countAfterStart,
+                             "onAttributionMatched must fire a re-registration")
+
+        let lastRequest = AnalyticsMockURLProtocol.receivedRequests.last!
+        let body = bodyFromRequest(lastRequest)
+        XCTAssertEqual(body?["attribution_token"] as? String, "attr-token-xyz",
+                       "Re-registration body must include attribution_token")
+    }
+
+    /// `start()` must seed `attributionToken` from a pre-stored `AttributionStore` entry
+    /// so the very first registration carries the token even when `match()` ran before
+    /// `start()`.
+    func testStartSeedsPreStoredAttributionToken() async throws {
+        let attributionStore = AttributionStore(defaults: defaults)
+        attributionStore.storeMatch(attributionId: "pre-match-token")
+
+        configureWithMockSession()
+        let analytics = makeAnalytics(attributionStore: attributionStore)
+
+        // start() seeds from the attribution store and registers.
+        analytics.start()
+
+        // Wait for the registration request.
+        for _ in 0..<100 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            if !AnalyticsMockURLProtocol.receivedRequests.isEmpty { break }
+        }
+
+        XCTAssertFalse(AnalyticsMockURLProtocol.receivedRequests.isEmpty,
+                       "start() must fire a registration")
+        let request = AnalyticsMockURLProtocol.receivedRequests.first!
+        let body = bodyFromRequest(request)
+        XCTAssertEqual(body?["attribution_token"] as? String, "pre-match-token",
+                       "start() must seed attribution_token from the AttributionStore")
+    }
+}
+
+// MARK: - AnalyticsMockURLProtocol
+
+/// Test-only URLProtocol for `AnalyticsTests` that captures registration requests
+/// and returns canned 200 responses. Kept separate from `AttributionMockURLProtocol`
+/// because they serve distinct test classes with different concurrency needs.
+private final class AnalyticsMockURLProtocol: URLProtocol {
+
+    nonisolated(unsafe) static var receivedRequests: [URLRequest] = []
+    nonisolated(unsafe) static var responder: ((URLRequest) -> (HTTPURLResponse, Data))?
+    private static let lock = NSLock()
+
+    static func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        receivedRequests = []
+        responder = nil
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.lock.lock()
+        Self.receivedRequests.append(request)
+        let responder = Self.responder
+        Self.lock.unlock()
+
+        guard let responder else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+            return
+        }
+
+        let (response, data) = responder(request)
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
