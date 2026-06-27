@@ -4,7 +4,19 @@ All notable changes to the Helm iOS SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-06-27
+
+### Added
+- HELM-203: `attribution_token` handshake so attribution now links to the installation, providing definitive device → install matching.
+- HELM-203: `Attribution.incrementAuthenticated(_:metadata:)` to track authenticated user events with optional metadata.
+- HELM-203: `Helm.logging` module for structured logging via OTLP to `/api/v1/logs` (preview-only with ingest token).
+- HELM-203: `APIPath` path centralization for maintainability across the SDK.
+
+### Changed
+- HELM-203: Attribution `device_id` unified to the Keychain installation `id` (removed separate device rotation).
+- HELM-203: `Attribution.reset()` no longer rotates the device identity; it clears state only.
+
+## [0.2.0] - 2026-06-10
 
 ### Added
 - HELM-186: `PrivacyInfo.xcprivacy` manifest shipped inside the SDK bundle declaring `UserDefaults` Required Reason API (`CA92.1`), `Device ID` (linked, App Functionality + Analytics), and `Other Diagnostic Data` (not linked, App Functionality).
@@ -64,7 +76,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `Helm.attribution.increment(_:metadata:)` for fire-and-forget event tracking.
 - Swift Package Manager support for iOS 15+ and macOS 12+.
 
-[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.1.2...HEAD
+[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/0.3.0...HEAD
+[0.3.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/0.2.0...0.3.0
+[0.2.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.1.2...0.2.0
 [1.1.2]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.1.1...1.1.2
 [1.1.1]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.1.0...1.1.1
 [1.1.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.0.2...1.1.0
