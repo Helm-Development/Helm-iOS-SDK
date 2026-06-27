@@ -11,9 +11,13 @@ internal struct HelmHTTPClient: Sendable {
     /// - Parameters:
     ///   - path: The API path (e.g. "/attribution/match/").
     ///   - body: A dictionary that will be serialized to JSON.
+    ///   - bearerOverride: When non-nil, this token is used in the `Authorization: Bearer`
+    ///     header instead of the configured publishable key. Use this for endpoints that
+    ///     require a different token type (e.g. `hlit_…` ingest tokens for log ingestion).
+    ///     All other request handling (retry, timeout, JSON encoding) is shared.
     /// - Returns: The parsed JSON response as a dictionary.
     /// - Throws: `HelmError` on configuration, encoding, network, or parsing failures.
-    static func post(path: String, body: [String: Any]) async throws -> [String: Any] {
+    static func post(path: String, body: [String: Any], bearerOverride: String? = nil) async throws -> [String: Any] {
         guard let config = Configuration.shared else {
             throw HelmError.notConfigured
         }
@@ -25,7 +29,8 @@ internal struct HelmHTTPClient: Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 10
-        request.setValue("Bearer \(config.publishableKey)", forHTTPHeaderField: "Authorization")
+        let bearerToken = bearerOverride ?? config.publishableKey
+        request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         // `JSONSerialization.data(withJSONObject:)` raises an Objective-C

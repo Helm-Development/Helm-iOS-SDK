@@ -52,4 +52,12 @@ public enum Helm {
     public static var analytics: Analytics {
         Analytics.shared
     }
+
+    /// Access structured logging features. Call `Helm.logging.configure(ingestToken:…)`
+    /// then `Helm.logging.start()` to enable OTLP log shipping to the Helm ingest
+    /// endpoint. **Preview / non-production only** — omit `configure` in production
+    /// builds and all `log(…)` calls become silent no-ops.
+    public static var logging: Logging {
+        Logging.shared
+    }
 }
