@@ -132,25 +132,27 @@ internal final class AttributionStore: @unchecked Sendable {
 
     /// Remove every key this store owns, returning the SDK to a fresh-install
     /// state. Used by `Attribution.reset()`.
+    ///
+    /// - Note: `helm_device_id` is intentionally NOT cleared here.  Device
+    ///   identity is now the Keychain-backed installation id owned by
+    ///   `Analytics`; attribution reset must not rotate it (HELM-203).
     func clearAll() {
         retryLock.lock()
         defer { retryLock.unlock() }
-        deviceIdLock.lock()
-        defer { deviceIdLock.unlock() }
         defaults.removeObject(forKey: Keys.checked)
         defaults.removeObject(forKey: Keys.attributionId)
-        defaults.removeObject(forKey: Keys.deviceId)
         defaults.removeObject(forKey: Keys.attempts)
         defaults.removeObject(forKey: Keys.lastAttempt)
     }
 
-    // MARK: - Device ID
+    // MARK: - Device ID (deprecated — HELM-203)
 
-    /// A stable device identifier (random UUID, generated once per install).
+    /// A UserDefaults-backed device identifier (random UUID, generated once
+    /// per install).
     ///
-    /// Serialized via `deviceIdLock` so that concurrent first-launch readers
-    /// observe a single generated UUID rather than racing to write different
-    /// values to UserDefaults.
+    /// - Deprecated: Attribution now uses the Keychain-backed installation id
+    ///   via `Analytics.shared.installationIdValue`.  This property is retained
+    ///   for backward compatibility but is no longer used in the match path.
     var deviceId: String {
         deviceIdLock.lock()
         defer { deviceIdLock.unlock() }

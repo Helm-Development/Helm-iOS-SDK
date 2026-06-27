@@ -9,6 +9,9 @@ public final class Attribution: @unchecked Sendable {
     internal static let shared = Attribution()
 
     private let store: AttributionStore
+    /// Source of the unified device identity (Keychain installation id).
+    /// Injected so tests can supply a fixed id without Keychain access.
+    private let installationId: () -> String
 
     // HELM-187: event queue + match-in-flight flag.
     //
@@ -31,13 +34,17 @@ public final class Attribution: @unchecked Sendable {
 
     private init() {
         self.store = AttributionStore()
+        self.installationId = { Analytics.shared.installationIdValue }
     }
 
     /// Internal initializer for tests. Allows injecting an `AttributionStore`
     /// backed by a non-`.standard` UserDefaults suite so suites don't
-    /// pollute each other.
-    internal init(store: AttributionStore) {
+    /// pollute each other, and an `installationId` closure to avoid Keychain
+    /// access in unit tests.
+    internal init(store: AttributionStore,
+                  installationId: @escaping () -> String = { Analytics.shared.installationIdValue }) {
         self.store = store
+        self.installationId = installationId
     }
 
     // MARK: - Match
@@ -77,7 +84,7 @@ public final class Attribution: @unchecked Sendable {
         defer { setMatchInFlight(false) }
 
         do {
-            let deviceId = store.deviceId
+            let deviceId = installationId()
             let signals = await DeviceSignals.collect()
 
             logger.info("match() starting — device_id=\(deviceId, privacy: .public) signals=\(signals.screenWidth)x\(signals.screenHeight)")

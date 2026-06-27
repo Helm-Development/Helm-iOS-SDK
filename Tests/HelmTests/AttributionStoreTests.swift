@@ -116,7 +116,7 @@ final class AttributionStoreTests: XCTestCase {
         XCTAssertEqual(store.attemptCount, 2)
     }
 
-    // MARK: - HELM-189: clearAll resets every key
+    // MARK: - HELM-189 / HELM-203: clearAll resets attribution keys, not device identity
 
     func test_clear_all_removes_every_key() {
         store.storeMatch(attributionId: UUID().uuidString)
@@ -132,9 +132,11 @@ final class AttributionStoreTests: XCTestCase {
         XCTAssertEqual(store.attemptCount, 0)
         XCTAssertTrue(store.canRetry)
 
-        // Next read regenerates a fresh device id.
+        // HELM-203: device identity is no longer cleared by clearAll() — it now
+        // lives in the Keychain installation id owned by Analytics.
         let newDeviceId = store.deviceId
-        XCTAssertNotEqual(newDeviceId, originalDeviceId)
+        XCTAssertEqual(newDeviceId, originalDeviceId,
+                       "clearAll() must not rotate device identity (HELM-203)")
     }
 
     // MARK: - HELM-185: Thread-safety stress test

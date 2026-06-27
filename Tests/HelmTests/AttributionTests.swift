@@ -196,11 +196,15 @@ final class AttributionTests: XCTestCase {
         }
     }
 
-    // MARK: - HELM-189: reset returns SDK to first-launch state
+    // MARK: - HELM-189 / HELM-203: reset returns SDK to first-launch state
 
-    /// A simulated match, then reset, then another simulated match — the
-    /// second match must produce a NEW device_id.
-    func test_reset_regenerates_device_id() async {
+    /// After reset(), attribution flags and `attribution_id` are cleared, but
+    /// the `device_id` (now the Keychain installation id) is STABLE — it must
+    /// be the same value in both match calls.
+    func test_reset_device_id_is_stable() async {
+        let fixedInstallId = "stable-install-id-helm203"
+        let localAttribution = Attribution(store: store, installationId: { fixedInstallId })
+
         // First match: capture the device_id from the request body.
         var firstDeviceId: String?
         configureSDK { request in
@@ -210,18 +214,18 @@ final class AttributionTests: XCTestCase {
             }
             return Self.successResponse(matched: true)
         }
-        await attribution._match()
+        await localAttribution._match()
 
-        XCTAssertNotNil(firstDeviceId, "First match must include a device_id")
+        XCTAssertEqual(firstDeviceId, fixedInstallId, "First match must send the injected installation id")
         XCTAssertTrue(store.hasChecked)
 
-        // Reset.
-        attribution.reset()
+        // Reset: must clear attribution flags but must NOT rotate device identity.
+        localAttribution.reset()
 
         XCTAssertFalse(store.hasChecked, "reset() must clear hasChecked")
         XCTAssertNil(store.attributionId, "reset() must clear attributionId")
 
-        // Second match: capture the NEW device_id.
+        // Second match: device_id must be identical — identity lives in Keychain.
         var secondDeviceId: String?
         AttributionMockURLProtocol.reset()
         configureSDK { request in
@@ -231,11 +235,32 @@ final class AttributionTests: XCTestCase {
             }
             return Self.successResponse(matched: true)
         }
-        await attribution._match()
+        await localAttribution._match()
 
         XCTAssertNotNil(secondDeviceId)
-        XCTAssertNotEqual(firstDeviceId, secondDeviceId,
-                          "After reset(), a new device_id must be generated")
+        XCTAssertEqual(firstDeviceId, secondDeviceId,
+                       "device_id must be stable across reset() — identity lives in the Keychain, not attribution state")
+    }
+
+    /// `match()` must send the injected installation id as `device_id` in the
+    /// request body, confirming attribution and analytics share one identity.
+    func test_match_sends_installation_id_as_device_id() async {
+        let expectedId = "injected-install-id-xyz-helm203"
+        let localAttribution = Attribution(store: store, installationId: { expectedId })
+
+        var capturedDeviceId: String?
+        configureSDK { request in
+            if let body = self.bodyFromRequest(request),
+               let id = body["device_id"] as? String {
+                capturedDeviceId = id
+            }
+            return Self.successResponse(matched: false)
+        }
+
+        await localAttribution._match()
+
+        XCTAssertEqual(capturedDeviceId, expectedId,
+                       "match() must send the Keychain installation id as device_id")
     }
 
     // MARK: - HELM-195: isConfigured and re-config warning

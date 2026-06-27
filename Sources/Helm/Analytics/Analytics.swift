@@ -120,6 +120,10 @@ public final class Analytics: @unchecked Sendable {
     /// Test hook: current queue depth.
     internal var queuedEventCount: Int { queue.count }
 
+    /// The Keychain-backed installation id. Exposed internally so `Attribution`
+    /// can use it as the unified `device_id` instead of the old UserDefaults UUID.
+    internal var installationIdValue: String { installationStore.installationId }
+
     private var isStarted: Bool {
         stateLock.lock(); defer { stateLock.unlock() }
         return started
