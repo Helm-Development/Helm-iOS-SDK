@@ -14,8 +14,9 @@ public enum Helm {
     /// - Parameters:
     ///   - publishableKey: Your project's publishable API key.
     ///   - baseURL: The Helm API base URL host (e.g. "https://helmcode.dev").
-    ///     Pass only the scheme + host -- the SDK appends the API path prefix
-    ///     (`/api/client/v1/...`) internally.
+    ///     Pass only the scheme + host -- the SDK appends per-feature path
+    ///     prefixes internally (attribution uses `/api/client/v1/...`;
+    ///     analytics uses `/api/v1/...`).
     ///   - session: The `URLSession` used for all network requests. Defaults to
     ///     `.shared`. Inject a custom session for testing or to provide custom
     ///     `URLSessionConfiguration` (timeouts, headers, etc.).

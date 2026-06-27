@@ -86,7 +86,7 @@ public final class Attribution: @unchecked Sendable {
             body["device_id"] = deviceId
 
             let response = try await HelmHTTPClient.post(
-                path: "/api/client/v1/attribution/match/",
+                path: APIPath.attributionMatch,
                 body: body
             )
 
@@ -176,7 +176,7 @@ public final class Attribution: @unchecked Sendable {
             }
 
             _ = try await HelmHTTPClient.post(
-                path: "/api/client/v1/attribution/event/",
+                path: APIPath.attributionEvent,
                 body: body
             )
         } catch {

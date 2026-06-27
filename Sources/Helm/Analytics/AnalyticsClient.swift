@@ -58,14 +58,14 @@ internal enum AnalyticsClient {
     /// the SDK always echoes its stored hash so identity never regresses (spec §5).
     static func registerInstallation(installationId: String, userHash: String) async throws {
         _ = try await HelmHTTPClient.post(
-            path: "/api/v1/analytics/installations/",
+            path: APIPath.analyticsInstallations,
             body: registrationBody(installationId: installationId, userHash: userHash)
         )
     }
 
     static func sendEvents(installationId: String, events: [AnalyticsEvent]) async throws {
         _ = try await HelmHTTPClient.post(
-            path: "/api/v1/analytics/events/",
+            path: APIPath.analyticsEvents,
             body: eventsBody(installationId: installationId, events: events)
         )
     }
