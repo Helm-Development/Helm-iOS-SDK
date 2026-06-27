@@ -76,9 +76,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `Helm.attribution.increment(_:metadata:)` for fire-and-forget event tracking.
 - Swift Package Manager support for iOS 15+ and macOS 12+.
 
-[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/0.3.0...HEAD
-[0.3.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/0.2.0...0.3.0
-[0.2.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.1.2...0.2.0
+[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.1.2...v0.2.0
 [1.1.2]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.1.1...1.1.2
 [1.1.1]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.1.0...1.1.1
 [1.1.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.0.2...1.1.0
