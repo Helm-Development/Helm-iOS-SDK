@@ -14,8 +14,9 @@ public enum Helm {
     /// - Parameters:
     ///   - publishableKey: Your project's publishable API key.
     ///   - baseURL: The Helm API base URL host (e.g. "https://helmcode.dev").
-    ///     Pass only the scheme + host -- the SDK appends the API path prefix
-    ///     (`/api/client/v1/...`) internally.
+    ///     Pass only the scheme + host -- the SDK appends per-feature path
+    ///     prefixes internally (attribution uses `/api/client/v1/...`;
+    ///     analytics uses `/api/v1/...`).
     ///   - session: The `URLSession` used for all network requests. Defaults to
     ///     `.shared`. Inject a custom session for testing or to provide custom
     ///     `URLSessionConfiguration` (timeouts, headers, etc.).
@@ -50,5 +51,13 @@ public enum Helm {
     /// `configure` to begin installation/session/event tracking.
     public static var analytics: Analytics {
         Analytics.shared
+    }
+
+    /// Access structured logging features. Call `Helm.logging.configure(ingestToken:…)`
+    /// then `Helm.logging.start()` to enable OTLP log shipping to the Helm ingest
+    /// endpoint. **Preview / non-production only** — omit `configure` in production
+    /// builds and all `log(…)` calls become silent no-ops.
+    public static var logging: Logging {
+        Logging.shared
     }
 }

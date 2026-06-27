@@ -29,6 +29,8 @@ final class AttributionTests: XCTestCase {
         attribution = nil
         Configuration.shared = nil
         AttributionMockURLProtocol.reset()
+        // Clear any token written on Analytics.shared by the handshake tests.
+        Analytics.shared.testHook_clearAttributionToken()
         super.tearDown()
     }
 
@@ -196,11 +198,15 @@ final class AttributionTests: XCTestCase {
         }
     }
 
-    // MARK: - HELM-189: reset returns SDK to first-launch state
+    // MARK: - HELM-189 / HELM-203: reset returns SDK to first-launch state
 
-    /// A simulated match, then reset, then another simulated match — the
-    /// second match must produce a NEW device_id.
-    func test_reset_regenerates_device_id() async {
+    /// After reset(), attribution flags and `attribution_id` are cleared, but
+    /// the `device_id` (now the Keychain installation id) is STABLE — it must
+    /// be the same value in both match calls.
+    func test_reset_device_id_is_stable() async {
+        let fixedInstallId = "stable-install-id-helm203"
+        let localAttribution = Attribution(store: store, installationId: { fixedInstallId })
+
         // First match: capture the device_id from the request body.
         var firstDeviceId: String?
         configureSDK { request in
@@ -210,18 +216,18 @@ final class AttributionTests: XCTestCase {
             }
             return Self.successResponse(matched: true)
         }
-        await attribution._match()
+        await localAttribution._match()
 
-        XCTAssertNotNil(firstDeviceId, "First match must include a device_id")
+        XCTAssertEqual(firstDeviceId, fixedInstallId, "First match must send the injected installation id")
         XCTAssertTrue(store.hasChecked)
 
-        // Reset.
-        attribution.reset()
+        // Reset: must clear attribution flags but must NOT rotate device identity.
+        localAttribution.reset()
 
         XCTAssertFalse(store.hasChecked, "reset() must clear hasChecked")
         XCTAssertNil(store.attributionId, "reset() must clear attributionId")
 
-        // Second match: capture the NEW device_id.
+        // Second match: device_id must be identical — identity lives in Keychain.
         var secondDeviceId: String?
         AttributionMockURLProtocol.reset()
         configureSDK { request in
@@ -231,11 +237,192 @@ final class AttributionTests: XCTestCase {
             }
             return Self.successResponse(matched: true)
         }
-        await attribution._match()
+        await localAttribution._match()
 
         XCTAssertNotNil(secondDeviceId)
-        XCTAssertNotEqual(firstDeviceId, secondDeviceId,
-                          "After reset(), a new device_id must be generated")
+        XCTAssertEqual(firstDeviceId, secondDeviceId,
+                       "device_id must be stable across reset() — identity lives in the Keychain, not attribution state")
+    }
+
+    /// `match()` must send the injected installation id as `device_id` in the
+    /// request body, confirming attribution and analytics share one identity.
+    func test_match_sends_installation_id_as_device_id() async {
+        let expectedId = "injected-install-id-xyz-helm203"
+        let localAttribution = Attribution(store: store, installationId: { expectedId })
+
+        var capturedDeviceId: String?
+        configureSDK { request in
+            if let body = self.bodyFromRequest(request),
+               let id = body["device_id"] as? String {
+                capturedDeviceId = id
+            }
+            return Self.successResponse(matched: false)
+        }
+
+        await localAttribution._match()
+
+        XCTAssertEqual(capturedDeviceId, expectedId,
+                       "match() must send the Keychain installation id as device_id")
+    }
+
+    // MARK: - HELM-203 #1b: attribution_token handshake
+
+    /// A successful `_match()` must forward the resolved `attribution_id` to
+    /// `Analytics.shared` via `onAttributionMatched`. Verified by reading the
+    /// test hook on the shared singleton (Analytics is not started here so the
+    /// re-registration branch is not triggered — that path is covered in
+    /// `AnalyticsTests.testOnAttributionMatchedWhileStartedTriggersReRegistrationWithToken`).
+    func test_match_success_forwards_attribution_id_to_analytics() async {
+        let expectedId = "attr-forwarded-helm203"
+
+        configureSDK { _ in Self.successResponse(matched: true, attributionId: expectedId) }
+
+        await attribution._match()
+
+        XCTAssertEqual(Analytics.shared.testHook_attributionToken, expectedId,
+                       "Successful _match() must forward attribution_id to Analytics.shared via onAttributionMatched")
+    }
+
+    // MARK: - HELM-203 #2: incrementAuthenticated
+
+    /// `incrementAuthenticated` must post to the attribution event endpoint
+    /// with `user_hash` present in the request body.
+    func test_incrementAuthenticated_sends_user_hash_in_body() async throws {
+        let expectedHash = "test-user-hash-helm203"
+        let localAttribution = Attribution(store: store, userHash: { expectedHash })
+
+        configureSDK { request in
+            let body = try! JSONSerialization.data(withJSONObject: ["ok": true])
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, body)
+        }
+
+        localAttribution.incrementAuthenticated("trial_start")
+
+        // Poll up to 2 s for the event request to arrive.
+        var eventRequests: [URLRequest] = []
+        for _ in 0 ..< 200 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            eventRequests = AttributionMockURLProtocol.receivedRequests.filter {
+                ($0.url?.absoluteString ?? "").contains("/attribution/event")
+            }
+            if !eventRequests.isEmpty { break }
+        }
+
+        XCTAssertEqual(eventRequests.count, 1, "incrementAuthenticated must post exactly one event")
+        let body = bodyFromRequest(eventRequests[0]) ?? [:]
+        XCTAssertEqual(body["user_hash"] as? String, expectedHash,
+                       "incrementAuthenticated must include user_hash in the event body")
+        XCTAssertEqual(body["event_type"] as? String, "trial_start")
+    }
+
+    /// Plain `increment` must NOT include `user_hash` in the event body, even
+    /// when a user is identified.
+    func test_increment_does_not_send_user_hash() async throws {
+        // Provide a user hash via the closure — increment() must ignore it.
+        let localAttribution = Attribution(store: store, userHash: { "should-not-appear" })
+
+        configureSDK { request in
+            let body = try! JSONSerialization.data(withJSONObject: ["ok": true])
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, body)
+        }
+
+        localAttribution.increment("page_view")
+
+        var eventRequests: [URLRequest] = []
+        for _ in 0 ..< 200 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            eventRequests = AttributionMockURLProtocol.receivedRequests.filter {
+                ($0.url?.absoluteString ?? "").contains("/attribution/event")
+            }
+            if !eventRequests.isEmpty { break }
+        }
+
+        XCTAssertEqual(eventRequests.count, 1, "increment must post exactly one event")
+        let body = bodyFromRequest(eventRequests[0]) ?? [:]
+        XCTAssertNil(body["user_hash"],
+                     "Plain increment must NOT include user_hash in the event body")
+    }
+
+    /// An `incrementAuthenticated` call queued while a match is in flight must
+    /// flush after the match resolves with `user_hash` intact.
+    func test_incrementAuthenticated_queued_during_match_flushes_with_user_hash() async throws {
+        let expectedHash = "queued-user-hash-helm203"
+        let matchedId = "attr-auth-queued"
+
+        let matchGate = DispatchSemaphore(value: 0)
+
+        configureSDK { request in
+            let urlString = request.url?.absoluteString ?? ""
+            if urlString.contains("/attribution/match") {
+                matchGate.wait()
+                return Self.successResponse(matched: true, attributionId: matchedId)
+            } else {
+                let body = try! JSONSerialization.data(withJSONObject: ["ok": true])
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"]
+                )!
+                return (response, body)
+            }
+        }
+
+        let localAttribution = Attribution(store: store, userHash: { expectedHash })
+
+        let matchTask = Task.detached(priority: .userInitiated) {
+            await localAttribution._match()
+        }
+
+        await Task.yield()
+
+        var inFlight = false
+        for _ in 0 ..< 200 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            if localAttribution.testHook_isMatchInFlight {
+                inFlight = true
+                break
+            }
+        }
+        XCTAssertTrue(inFlight, "Match should set matchInFlight=true before we queue the auth event")
+
+        // Queue one authenticated event while the match is gated.
+        localAttribution.incrementAuthenticated("purchase")
+
+        XCTAssertEqual(localAttribution.testHook_pendingEventCount, 1,
+                       "Auth event must be queued while match is in flight")
+
+        matchGate.signal()
+        await matchTask.value
+
+        // Wait for the flushed event to arrive.
+        var eventRequests: [URLRequest] = []
+        for _ in 0 ..< 200 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            eventRequests = AttributionMockURLProtocol.receivedRequests.filter {
+                ($0.url?.absoluteString ?? "").contains("/attribution/event")
+            }
+            if !eventRequests.isEmpty { break }
+        }
+
+        XCTAssertEqual(eventRequests.count, 1, "Queued auth event must be flushed after match")
+        let body = bodyFromRequest(eventRequests[0]) ?? [:]
+        XCTAssertEqual(body["user_hash"] as? String, expectedHash,
+                       "Flushed auth event must preserve user_hash captured at enqueue time")
+        XCTAssertEqual(body["attribution_id"] as? String, matchedId,
+                       "Flushed auth event must carry the resolved attribution_id")
     }
 
     // MARK: - HELM-195: isConfigured and re-config warning

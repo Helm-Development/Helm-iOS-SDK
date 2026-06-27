@@ -26,8 +26,12 @@ public final class Analytics: @unchecked Sendable {
     private let identityStore: IdentityStore
     private let sessionManager: SessionManager
     private let queue: EventQueue
+    private let attributionStore: AttributionStore
     private let stateLock = NSLock()
     private var started = false
+    /// The attribution_token forwarded from a successful `match()` response.
+    /// Guarded by `stateLock`. Mirrors Android's `@Volatile attributionToken`.
+    private var attributionToken: String?
     private var flushTimer: DispatchSourceTimer?
     private var observerTokens: [NSObjectProtocol] = []
     private static let flushInterval: TimeInterval = 30
@@ -35,11 +39,13 @@ public final class Analytics: @unchecked Sendable {
     internal init(installationStore: InstallationStore = InstallationStore(),
                   identityStore: IdentityStore = IdentityStore(),
                   sessionManager: SessionManager = SessionManager(),
-                  queue: EventQueue = EventQueue()) {
+                  queue: EventQueue = EventQueue(),
+                  attributionStore: AttributionStore = AttributionStore()) {
         self.installationStore = installationStore
         self.identityStore = identityStore
         self.sessionManager = sessionManager
         self.queue = queue
+        self.attributionStore = attributionStore
     }
 
     deinit {
@@ -57,12 +63,15 @@ public final class Analytics: @unchecked Sendable {
             return
         }
         // Check-and-set under the lock so concurrent double-start is impossible.
+        // Seed the attribution token inside the same lock so the first register()
+        // call below already carries the token from a prior match() (Android §92).
         stateLock.lock()
         if started {
             stateLock.unlock()
             return
         }
         started = true
+        attributionToken = attributionStore.attributionId
         stateLock.unlock()
         observeLifecycle()
         startFlushTimer()
@@ -79,6 +88,18 @@ public final class Analytics: @unchecked Sendable {
     /// to its last-known user (spec §5).
     public func clearIdentity() {
         identityStore.clear()
+    }
+
+    /// Called by `Attribution._match()` on a successful attribution match.
+    /// Stores the token and, if analytics has started, re-registers so the
+    /// server closes the Attribution → Installation join via
+    /// `_close_attribution_pairing`. Robust to launch ordering: if `start()`
+    /// hasn't been called yet the token is seeded later in `start()`.
+    internal func onAttributionMatched(_ attributionId: String) {
+        stateLock.lock()
+        attributionToken = attributionId.isEmpty ? nil : attributionId
+        stateLock.unlock()
+        if isStarted { register() }
     }
 
     /// Queue a custom event. Flushes automatically at 50 events / 30 s / background.
@@ -120,6 +141,28 @@ public final class Analytics: @unchecked Sendable {
     /// Test hook: current queue depth.
     internal var queuedEventCount: Int { queue.count }
 
+    /// The Keychain-backed installation id. Exposed internally so `Attribution`
+    /// can use it as the unified `device_id` instead of the old UserDefaults UUID.
+    internal var installationIdValue: String { installationStore.installationId }
+
+    /// The stored user hash, or `nil` when anonymous. Exposed internally so
+    /// `Attribution.incrementAuthenticated` can attach identity to event bodies.
+    internal var currentUserHash: String? { identityStore.userHash }
+
+    /// Test hook: current attribution token (nil if none set).
+    internal var testHook_attributionToken: String? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return attributionToken
+    }
+
+    /// Test hook: clear the attribution token between tests to prevent cross-test
+    /// pollution when `Analytics.shared` is used in `AttributionTests`.
+    internal func testHook_clearAttributionToken() {
+        stateLock.lock()
+        attributionToken = nil
+        stateLock.unlock()
+    }
+
     private var isStarted: Bool {
         stateLock.lock(); defer { stateLock.unlock() }
         return started
@@ -128,10 +171,14 @@ public final class Analytics: @unchecked Sendable {
     private func register() {
         let installationId = installationStore.installationId
         let userHash = identityStore.userHash ?? ""
+        stateLock.lock()
+        let token = attributionToken
+        stateLock.unlock()
         Task {
             do {
                 try await AnalyticsClient.registerInstallation(installationId: installationId,
-                                                               userHash: userHash)
+                                                               userHash: userHash,
+                                                               attributionToken: token)
             } catch {
                 // Registration retries on next launch; never surfaces (spec §6).
                 logger.error("registration failed: \(error.localizedDescription, privacy: .public)")

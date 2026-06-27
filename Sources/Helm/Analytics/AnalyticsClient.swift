@@ -33,8 +33,8 @@ internal enum AnalyticsClient {
 
     // MARK: - Payload builders (pure, unit-tested)
 
-    static func registrationBody(installationId: String, userHash: String) -> [String: Any] {
-        [
+    static func registrationBody(installationId: String, userHash: String, attributionToken: String? = nil) -> [String: Any] {
+        var dict: [String: Any] = [
             "installation_id": installationId,
             "platform": platformName(),
             "app_version": appVersion(),
@@ -43,6 +43,11 @@ internal enum AnalyticsClient {
             "timezone": TimeZone.current.identifier,
             "user_hash": userHash,
         ]
+        // Include attribution_token only when non-empty; mirrors Android AnalyticsClient.kt:58.
+        if let token = attributionToken, !token.isEmpty {
+            dict["attribution_token"] = token
+        }
+        return dict
     }
 
     static func eventsBody(installationId: String, events: [AnalyticsEvent]) -> [String: Any] {
@@ -56,16 +61,18 @@ internal enum AnalyticsClient {
 
     /// Register (or re-register) this installation. `userHash` may be "" when anonymous;
     /// the SDK always echoes its stored hash so identity never regresses (spec §5).
-    static func registerInstallation(installationId: String, userHash: String) async throws {
+    /// `attributionToken` is forwarded as `attribution_token` when non-empty so the
+    /// server can close the Attribution → Installation pairing via `_close_attribution_pairing`.
+    static func registerInstallation(installationId: String, userHash: String, attributionToken: String? = nil) async throws {
         _ = try await HelmHTTPClient.post(
-            path: "/api/v1/analytics/installations/",
-            body: registrationBody(installationId: installationId, userHash: userHash)
+            path: APIPath.analyticsInstallations,
+            body: registrationBody(installationId: installationId, userHash: userHash, attributionToken: attributionToken)
         )
     }
 
     static func sendEvents(installationId: String, events: [AnalyticsEvent]) async throws {
         _ = try await HelmHTTPClient.post(
-            path: "/api/v1/analytics/events/",
+            path: APIPath.analyticsEvents,
             body: eventsBody(installationId: installationId, events: events)
         )
     }
