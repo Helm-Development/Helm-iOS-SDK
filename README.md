@@ -33,7 +33,7 @@ The official Swift SDK for [Helm](https://helmcode.dev). Attribute installs, tra
    ```
    https://github.com/Helm-Development/Helm-iOS-SDK.git
    ```
-3. Set the dependency rule to **Up to Next Major Version** starting from `1.1.2`.
+3. Set the dependency rule to **Up to Next Major Version** starting from `1.2.0`.
 4. Add the `Helm` library product to your app target.
 
 ### Swift Package Manager (Package.swift)
@@ -42,7 +42,7 @@ Add Helm to the `dependencies` array of your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Helm-Development/Helm-iOS-SDK.git", from: "1.1.2")
+    .package(url: "https://github.com/Helm-Development/Helm-iOS-SDK.git", from: "1.2.0")
 ]
 ```
 
@@ -235,10 +235,19 @@ The SDK emits structured logs via Apple's unified logging system under the subsy
 Helm follows [Semantic Versioning](https://semver.org):
 
 - **Major** (`2.0.0`) — breaking API changes
-- **Minor** (`1.2.0`) — additive, backwards-compatible API
-- **Patch** (`1.1.3`) — backwards-compatible bug fixes
+- **Minor** (`1.3.0`) — additive, backwards-compatible API
+- **Patch** (`1.2.1`) — backwards-compatible bug fixes
 
-See [CHANGELOG.md](CHANGELOG.md) for release notes.
+The current release is **1.2.0**. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
+### Tagging convention
+
+Release tags are **bare numeric** — `1.2.0`, never `v1.2.0`. Two `v`-prefixed tags
+(`v0.2.0`, `v0.3.0`) were published in June 2026 by mistake. SwiftPM strips the leading
+`v`, so those tags resolved as `0.2.0` / `0.3.0` — *below* the then-current `1.1.2` — and
+were therefore unreachable from any `from: "1.1.x"` dependency rule. They are retained
+only so existing checkouts do not break; do not add more. Every new release must be a
+bare-numeric tag that sorts strictly above the previous release.
 
 ## Contributing
 

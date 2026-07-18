@@ -4,6 +4,34 @@ All notable changes to the Helm iOS SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-07-18
+
+Re-release of the `0.2.0` and `0.3.0` work under a version number that SwiftPM can
+actually resolve from a `1.x` dependency rule. **Anyone on `1.1.2` or earlier must
+upgrade** — see below.
+
+### Fixed
+- HELM-214: Restored a single monotonic tag series. The `0.2.0` and `0.3.0` releases were
+  tagged `v0.2.0` / `v0.3.0`; SwiftPM strips the leading `v` and reads them as `0.2.0` /
+  `0.3.0`, which sort *below* the previously published `1.1.2`. A `from: "1.1.2"`
+  requirement resolves to `[1.1.2, 2.0.0)` and therefore always selected `1.1.2` — the
+  fixes shipped in `0.2.0` and `0.3.0` were unreachable for every integrator. `1.2.0`
+  carries that same code at a version the resolver can reach.
+- HELM-183: Attribution requests now include the `/api/client/v1` path prefix. Prior to
+  this fix `match()` and `increment(...)` posted to `/attribution/match/` and
+  `/attribution/event/`, which the Helm backend answers with **HTTP 404**. On `1.1.2` and
+  earlier, no install was ever attributed and no event was ever recorded. Pass scheme +
+  host only to `Helm.configure(baseURL:)` — the SDK appends the prefix itself.
+
+### Note for integrators upgrading from 1.1.2
+This release contains every change listed under `[0.3.0]` and `[0.2.0]` below. Two of
+them are behavioral changes worth reading before you upgrade:
+
+- `Helm.configure(baseURL:)` must be given scheme + host only (e.g.
+  `"https://helmcode.dev"`). If you previously worked around the 404 by passing a URL that
+  already contained `/api/client/v1`, remove that prefix.
+- macOS is no longer a supported platform (HELM-194); iOS 15+ only.
+
 ## [0.3.0] - 2026-06-27
 
 ### Added
@@ -76,7 +104,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `Helm.attribution.increment(_:metadata:)` for fire-and-forget event tracking.
 - Swift Package Manager support for iOS 15+ and macOS 12+.
 
-[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.2.0...HEAD
+[1.2.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.1.2...1.2.0
 [0.3.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.1.2...v0.2.0
 [1.1.2]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.1.1...1.1.2
