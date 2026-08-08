@@ -33,6 +33,11 @@ public enum Helm {
             baseURL: baseURL,
             session: session
         )
+
+        // HELM-220: integrating apps call `configure` on every launch, which
+        // makes it the natural moment to drain any attribution submissions that
+        // failed while the device was offline. No-op when the queue is empty.
+        Attribution.shared.replayPendingSubmissions()
     }
 
     /// Whether `Helm.configure(...)` has been called and the SDK is ready to
