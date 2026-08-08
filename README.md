@@ -11,10 +11,11 @@ The official Swift SDK for [Helm](https://helmcode.dev). Attribute installs, tra
 
 - **Attribution matching** — match each install to the campaign, channel, or tracking link that drove it, using device-side signals (no IDFA required).
 - **Event tracking** — record conversion events (`signup`, `purchase`, etc.) with optional metadata, automatically linked to the matched attribution source.
-- **Fire-and-forget API** — all network calls run in the background; calling code never blocks.
+- **Influencer promo codes** — link a user to an influencer's code, read back the paywall offering to present, and report the purchase's original transaction id for revenue attribution.
+- **Offline-tolerant** — promo-code and transaction submissions that can't reach the server are queued on device and replayed automatically for up to 30 days; attribution status is cached per user so paywalls render correctly offline.
+- **Fire-and-forget API** — event and transaction calls run in the background; calling code never blocks.
 - **Privacy-first** — no IDFA, no ATT prompt, no third-party trackers. Device signals are collected only on first match and never persisted off-device by the SDK.
 - **Zero dependencies** — pure Foundation + `os.log`. No transitive packages.
-- **Lightweight** — under 500 lines of source.
 
 ## Requirements
 
@@ -33,7 +34,7 @@ The official Swift SDK for [Helm](https://helmcode.dev). Attribute installs, tra
    ```
    https://github.com/Helm-Development/Helm-iOS-SDK.git
    ```
-3. Set the dependency rule to **Up to Next Major Version** starting from `1.2.0`.
+3. Set the dependency rule to **Up to Next Major Version** starting from `1.3.0`.
 4. Add the `Helm` library product to your app target.
 
 ### Swift Package Manager (Package.swift)
@@ -42,7 +43,7 @@ Add Helm to the `dependencies` array of your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Helm-Development/Helm-iOS-SDK.git", from: "1.2.0")
+    .package(url: "https://github.com/Helm-Development/Helm-iOS-SDK.git", from: "1.3.0")
 ]
 ```
 
@@ -138,6 +139,84 @@ Helm.attribution.increment("purchase", metadata: [
 
 All event calls are fire-and-forget — they return immediately and never throw.
 
+## Influencer attribution
+
+Helm can link a signed-in user to an influencer's promo code, tell you which paywall offering to present to them, and attribute the resulting purchase back to that influencer.
+
+> ### ⚠️ `userId` must match your RevenueCat app user ID
+>
+> `userId` is **opaque to Helm and passed through verbatim** — Helm never validates, normalizes, hashes, or truncates it. **It MUST be exactly the same string your app sets as the RevenueCat app user ID** (the value you pass to `Purchases.logIn(_:)` or `Purchases.configure(appUserID:)`).
+>
+> Helm's revenue matching joins influencer attribution to RevenueCat transactions on that equality. If the two strings drift — different casing, an email in one place and a UUID in the other, a prefix added on one side — the promo code links but no revenue ever attributes to the influencer, and nothing surfaces an error. Keeping them aligned is the integrating app's responsibility.
+
+### 1. Submit a promo code
+
+```swift
+do {
+    let result = try await Helm.attribution.submitPromoCode(
+        userId: currentUser.revenueCatAppUserID,
+        code: enteredCode
+    )
+    switch result {
+    case .linked(let influencerCode, let offeringId):
+        // Linked server-side. Present `offeringId` on the paywall if non-nil.
+        show(offering: offeringId)
+    case .queued:
+        // No connectivity — Helm persisted the submission and will replay it.
+        showMessage("We'll apply your code as soon as you're back online.")
+    }
+} catch HelmAttributionError.invalidCode {
+    showMessage("That code doesn't exist.")
+} catch HelmAttributionError.codeInactive {
+    showMessage("That code is no longer active.")
+} catch HelmAttributionError.alreadyLinked {
+    showMessage("A different code is already applied to your account.")
+} catch {
+    showMessage((error as? LocalizedError)?.errorDescription ?? "Something went wrong.")
+}
+```
+
+`.queued` is **not** a failure — it means the submission survived the network outage and will be retried automatically (see [Offline behavior](#offline-behavior)). Because `submitPromoCode` is `@discardableResult`, ignoring the return value silently discards that distinction; inspect it whenever you show UI.
+
+### 2. Pick the paywall offering
+
+```swift
+let status = try await Helm.attribution.fetchAttributionStatus(
+    userId: currentUser.revenueCatAppUserID
+)
+
+if status.isLinked, let offeringId = status.offeringId {
+    show(offering: offeringId)
+} else {
+    show(offering: defaultOfferingId)
+}
+
+if status.fromCache {
+    // Served from the on-device cache because the network was unreachable.
+    // The values are the last ones Helm's server confirmed for this user.
+}
+```
+
+### 3. Report the purchase
+
+Call this once the purchase completes, with the StoreKit original transaction id (`Transaction.originalID` in StoreKit 2, or `original_transaction_id` from the receipt):
+
+```swift
+Helm.attribution.submitOriginalTransactionId(
+    userId: currentUser.revenueCatAppUserID,
+    originalTransactionId: String(transaction.originalID)
+)
+```
+
+This returns immediately and never throws — purchase UX never blocks on Helm.
+
+### Offline behavior
+
+- **Transport failures are queued.** No connectivity, a timeout, or a 5xx means the submission is persisted to Helm's own `UserDefaults` keys and replayed automatically on the next `Helm.configure(...)` call, when the app returns to the foreground, and before the next attribution call. Entries are retained for **30 days**, deduplicated, and bounded at 100.
+- **Validation verdicts are terminal.** `invalid_code`, `code_inactive`, `already_linked`, and any other 4xx are answers, not outages — they are surfaced to you (or logged and dropped, for the fire-and-forget transaction method) and are **never** queued or retried.
+- **Status reads fall back to the cache.** `fetchAttributionStatus` returns the last server-confirmed status for that `userId` with `fromCache: true` when the network is unreachable, and only throws `.network` when nothing is cached for that user. Cached statuses are stored per `userId`, so a shared device never serves one account's offering to another. A real 4xx is still thrown rather than masked by the cache.
+- **A queued code that later turns out to be invalid fails silently.** By the time a replay runs, the call that submitted it has long since returned. Helm logs and drops the entry; if your product needs to tell the user, re-read `fetchAttributionStatus` when the paywall next appears.
+
 ## API Reference
 
 ### `Helm`
@@ -182,11 +261,77 @@ public final class Attribution {
     ///   - metadata: Optional key-value metadata attached to the event.
     public func increment(_ eventType: String, metadata: [String: Any]? = nil)
 
+    /// Record an attribution event tied to the authenticated user identity.
+    public func incrementAuthenticated(_ eventType: String, metadata: [String: Any]? = nil)
+
+    /// Submit an influencer promo code for the given user.
+    /// - Parameters:
+    ///   - userId: Opaque, passed through verbatim. MUST equal the string
+    ///     your app sets as the RevenueCat app user ID.
+    ///   - code: The code the user entered. The server normalizes case.
+    /// - Returns: `.linked(influencerCode:offeringId:)`, or `.queued` when the
+    ///   network was unreachable and the submission was persisted for replay.
+    /// - Throws: `HelmAttributionError`.
+    @discardableResult
+    public func submitPromoCode(userId: String, code: String) async throws -> PromoCodeResult
+
+    /// Fetch the user's influencer-attribution status. Falls back to the
+    /// on-device cache (`fromCache: true`) on a transport failure.
+    /// - Throws: `HelmAttributionError`.
+    public func fetchAttributionStatus(userId: String) async throws -> AttributionStatus
+
+    /// Report a purchase's StoreKit original transaction id so Helm can
+    /// attribute revenue to the influencer. Fire-and-forget: returns
+    /// immediately, never throws, queues on transport failure.
+    public func submitOriginalTransactionId(userId: String, originalTransactionId: String)
+
     /// Reset all SDK attribution state so the next `match()` runs as if
-    /// this were a fresh install. Generates a new `device_id`, clears
-    /// the stored attribution match, drops any queued events, and resets
-    /// the retry budget. Call this on logout or account deletion.
+    /// this were a fresh install: clears the stored attribution match,
+    /// drops any queued events, resets the retry budget, and empties the
+    /// pending submission queue and attribution status cache. Call this on
+    /// logout or account deletion.
     public func reset()
+}
+```
+
+### `PromoCodeResult`
+
+```swift
+public enum PromoCodeResult: Equatable, Sendable {
+    /// Linked server-side. `offeringId` is the RevenueCat offering to serve.
+    case linked(influencerCode: String, offeringId: String?)
+    /// Transport failure — persisted on device and replayed automatically for
+    /// up to 30 days. Not a failure; tell the user it will apply when online.
+    case queued
+}
+```
+
+### `AttributionStatus`
+
+```swift
+public struct AttributionStatus: Equatable, Sendable {
+    public let isLinked: Bool
+    public let influencerCode: String?
+    public let offeringId: String?
+    /// True when served from the on-device cache because the network was
+    /// unreachable; false when fresh from the server.
+    public let fromCache: Bool
+}
+```
+
+### `HelmAttributionError`
+
+The only error type thrown by the attribution methods — the SDK's internal networking error never crosses the public boundary.
+
+```swift
+public enum HelmAttributionError: Error, Equatable, Sendable, LocalizedError {
+    case notConfigured                              // Helm.configure(...) not called
+    case invalidCode                                // backend `invalid_code`
+    case codeInactive                               // backend `code_inactive`
+    case alreadyLinked                              // backend `already_linked`
+    case network                                    // offline/timeout/5xx, nothing queued or cached
+    case server(code: String, message: String)      // any other backend error envelope
+    case invalidResponse                            // 2xx with an unusable body
 }
 ```
 
@@ -212,9 +357,17 @@ Copy these entries into your App Store Connect → App Privacy form:
 | Data Category | Data Type | Linked to User | Used for Tracking | Purposes |
 |---------------|-----------|----------------|-------------------|----------|
 | Identifiers   | Device ID | Yes            | No                | App Functionality, Analytics |
+| Identifiers   | User ID   | Yes            | No                | App Functionality |
 | Diagnostics   | Other Diagnostic Data | No     | No                | App Functionality |
 
 "Device ID" here is the per-install UUID Helm generates and stores in its own `UserDefaults` suite (it is **not** the IDFA and **not** the IDFV). It is linked to the user account in your Helm dashboard, but Helm never uses it for cross-app or cross-developer tracking.
+
+"User ID" is the `userId` **you** pass to the influencer-attribution methods (`submitPromoCode`, `fetchAttributionStatus`, `submitOriginalTransactionId`). Declare this row only if your app calls them. Helm sends that string to your Helm backend and, as of 1.3.0, also persists it on device:
+
+- inside any **queued submission** that failed for transport reasons (until it replays, or 30 days pass), and
+- as the key of the **attribution status cache** (until it is overwritten, evicted, or wiped).
+
+Both live in Helm's own `UserDefaults` keys, already covered by the SDK manifest's `CA92.1` Required Reason declaration — no Required Reason change is needed in your app. Both are cleared by `Helm.attribution.reset()` and `Helm.analytics.clearIdentity()`.
 
 ### Account deletion
 
@@ -224,7 +377,9 @@ For App Review Guideline 5.1.1(v) compliance, host apps that offer in-app accoun
 Helm.attribution.reset()
 ```
 
-`reset()` generates a new `device_id`, clears the stored attribution match, drops any queued events, and resets the retry budget so the next `match()` runs as if on a fresh install.
+`reset()` clears the stored attribution match, drops any queued events, resets the retry budget, and empties the pending submission queue and the attribution status cache — so no `userId` supplied by the previous user survives on device and the next `match()` runs as if on a fresh install.
+
+`Helm.analytics.clearIdentity()` also clears the pending submission queue and the status cache, so a plain logout is enough to stop the next user on the device from inheriting the previous user's promo code or offering.
 
 ## Logging
 
@@ -236,9 +391,9 @@ Helm follows [Semantic Versioning](https://semver.org):
 
 - **Major** (`2.0.0`) — breaking API changes
 - **Minor** (`1.3.0`) — additive, backwards-compatible API
-- **Patch** (`1.2.1`) — backwards-compatible bug fixes
+- **Patch** (`1.3.1`) — backwards-compatible bug fixes
 
-The current release is **1.2.0**. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+The current release is **1.3.0**. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ### Tagging convention
 
