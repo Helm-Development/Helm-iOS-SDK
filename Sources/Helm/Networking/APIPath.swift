@@ -14,6 +14,14 @@ enum APIPath {
     static let attributionMatch  = "/api/client/v1/attribution/match/"
     static let attributionEvent  = "/api/client/v1/attribution/event/"
 
+    // HELM-220: influencer promo-code attribution. These three strings are a
+    // hard parity contract with the backend router — a single character of
+    // drift means a silent 404 for every integrator (see HELM-183). They are
+    // asserted literally in `AttributionSubmissionTests`.
+    static let attributionPromoCode   = "/api/client/v1/attribution/promo-code/"
+    static let attributionStatus      = "/api/client/v1/attribution/status/"
+    static let attributionTransaction = "/api/client/v1/attribution/transaction/"
+
     // MARK: - Analytics (/api/v1/analytics/*)
 
     static let analyticsInstallations = "/api/v1/analytics/installations/"

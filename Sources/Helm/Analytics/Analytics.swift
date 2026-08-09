@@ -27,6 +27,10 @@ public final class Analytics: @unchecked Sendable {
     private let sessionManager: SessionManager
     private let queue: EventQueue
     private let attributionStore: AttributionStore
+    /// HELM-220: cleared on `clearIdentity()` so a logout leaves no
+    /// host-supplied `userId` on device.
+    private let pendingSubmissionStore: PendingSubmissionStore
+    private let statusCache: AttributionStatusCache
     private let stateLock = NSLock()
     private var started = false
     /// The attribution_token forwarded from a successful `match()` response.
@@ -40,12 +44,16 @@ public final class Analytics: @unchecked Sendable {
                   identityStore: IdentityStore = IdentityStore(),
                   sessionManager: SessionManager = SessionManager(),
                   queue: EventQueue = EventQueue(),
-                  attributionStore: AttributionStore = AttributionStore()) {
+                  attributionStore: AttributionStore = AttributionStore(),
+                  pendingSubmissionStore: PendingSubmissionStore = PendingSubmissionStore(),
+                  statusCache: AttributionStatusCache = AttributionStatusCache()) {
         self.installationStore = installationStore
         self.identityStore = identityStore
         self.sessionManager = sessionManager
         self.queue = queue
         self.attributionStore = attributionStore
+        self.pendingSubmissionStore = pendingSubmissionStore
+        self.statusCache = statusCache
     }
 
     deinit {
@@ -86,8 +94,15 @@ public final class Analytics: @unchecked Sendable {
 
     /// Drop the identity on logout. The installation stays bound server-side
     /// to its last-known user (spec §5).
+    ///
+    /// HELM-220: also drops the offline attribution submission queue and the
+    /// per-user attribution status cache. Both hold the host-supplied `userId`,
+    /// so leaving them behind would let the next user on this device replay the
+    /// previous user's promo code or read their offering.
     public func clearIdentity() {
         identityStore.clear()
+        pendingSubmissionStore.clearAll()
+        statusCache.clearAll()
     }
 
     /// Called by `Attribution._match()` on a successful attribution match.

@@ -4,6 +4,39 @@ All notable changes to the Helm iOS SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-08-08
+
+Influencer promo-code attribution. Additive and backwards-compatible — no existing
+API changed shape.
+
+### Added
+- HELM-220: `Helm.attribution.submitPromoCode(userId:code:)`,
+  `Helm.attribution.fetchAttributionStatus(userId:)`, and
+  `Helm.attribution.submitOriginalTransactionId(userId:originalTransactionId:)` for
+  influencer promo-code attribution. The first two are the SDK's first public
+  `async throws` methods; the third keeps the established fire-and-forget shape.
+- HELM-220: Public `PromoCodeResult` (including `.queued`), `AttributionStatus`
+  (with `fromCache`), and `HelmAttributionError` mapped from the backend error
+  envelope (`invalid_code`, `code_inactive`, `already_linked`, plus pass-through
+  for any other code). The SDK's internal networking error type no longer bounds
+  the public surface.
+- HELM-220: Offline submission queue — promo-code and transaction submissions that
+  fail for transport reasons (no connectivity, timeout, 5xx) persist in
+  UserDefaults and replay automatically on `Helm.configure(...)`, on app
+  foreground, and before the next attribution call. 30-day retention, bounded at
+  100 entries, deduplicated on `(kind, userId, value)`. Server-side validation
+  failures are terminal and are never queued.
+- HELM-220: Per-user attribution status cache so paywalls can still render the
+  correct offering while offline, flagged `fromCache: true`.
+
+### Changed
+- HELM-220: `Helm.attribution.reset()` and `Helm.analytics.clearIdentity()` now
+  also clear the pending submission queue and the attribution status cache, so a
+  logout leaves no host-supplied `userId` on device.
+- HELM-220: `PrivacyInfo.xcprivacy` now declares
+  `NSPrivacyCollectedDataTypeUserID` (linked, App Functionality) alongside the
+  existing Device ID entry, matching the `userId` the new methods send.
+
 ## [1.2.0] - 2026-07-18
 
 Re-release of the `0.2.0` and `0.3.0` work under a version number that SwiftPM can
@@ -104,7 +137,8 @@ them are behavioral changes worth reading before you upgrade:
 - `Helm.attribution.increment(_:metadata:)` for fire-and-forget event tracking.
 - Swift Package Manager support for iOS 15+ and macOS 12+.
 
-[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.2.0...HEAD
+[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.3.0...HEAD
+[1.3.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.2.0...1.3.0
 [1.2.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.1.2...1.2.0
 [0.3.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.1.2...v0.2.0
