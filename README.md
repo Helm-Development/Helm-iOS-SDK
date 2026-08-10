@@ -13,6 +13,7 @@ The official Swift SDK for [Helm](https://helmcode.dev). Attribute installs, tra
 - **Event tracking** — record conversion events (`signup`, `purchase`, etc.) with optional metadata, automatically linked to the matched attribution source.
 - **Influencer promo codes** — link a user to an influencer's code, read back the paywall offering to present, and report the purchase's original transaction id for revenue attribution.
 - **Offline-tolerant** — promo-code and transaction submissions that can't reach the server are queued on device and replayed automatically for up to 30 days; attribution status is cached per user so paywalls render correctly offline.
+- **Sandbox test data** — `Helm.configure(debug: true)` marks a build's attribution submissions as test data, keeping your own QA redemptions and sandbox purchases out of live influencer payouts. Defaults to `false`, so production builds are safe by default.
 - **Fire-and-forget API** — event and transaction calls run in the background; calling code never blocks.
 - **Privacy-first** — no IDFA, no ATT prompt, no third-party trackers. Device signals are collected only on first match and never persisted off-device by the SDK.
 - **Zero dependencies** — pure Foundation + `os.log`. No transitive packages.
@@ -34,7 +35,7 @@ The official Swift SDK for [Helm](https://helmcode.dev). Attribute installs, tra
    ```
    https://github.com/Helm-Development/Helm-iOS-SDK.git
    ```
-3. Set the dependency rule to **Up to Next Major Version** starting from `1.3.0`.
+3. Set the dependency rule to **Up to Next Major Version** starting from `1.4.0`.
 4. Add the `Helm` library product to your app target.
 
 ### Swift Package Manager (Package.swift)
@@ -43,7 +44,7 @@ Add Helm to the `dependencies` array of your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Helm-Development/Helm-iOS-SDK.git", from: "1.3.0")
+    .package(url: "https://github.com/Helm-Development/Helm-iOS-SDK.git", from: "1.4.0")
 ]
 ```
 
@@ -75,7 +76,11 @@ struct MyApp: App {
     init() {
         Helm.configure(
             publishableKey: "pk_live_your_publishable_key",
-            baseURL: "https://helmcode.dev"
+            baseURL: "https://helmcode.dev",
+            // Optional. `true` marks this build's attribution submissions as
+            // sandbox test data. Defaults to `false` — see "Sandbox test data
+            // (`debug`)" below. Drive it from your build configuration:
+            debug: AppEnvironment.current != .production
         )
         // Optional: inject a custom URLSession for testing or proxying.
         // Helm.configure(
@@ -217,6 +222,34 @@ This returns immediately and never throws — purchase UX never blocks on Helm.
 - **Status reads fall back to the cache.** `fetchAttributionStatus` returns the last server-confirmed status for that `userId` with `fromCache: true` when the network is unreachable, and only throws `.network` when nothing is cached for that user. Cached statuses are stored per `userId`, so a shared device never serves one account's offering to another. A real 4xx is still thrown rather than masked by the cache.
 - **A queued code that later turns out to be invalid fails silently.** By the time a replay runs, the call that submitted it has long since returned. Helm logs and drops the entry; if your product needs to tell the user, re-read `fetchAttributionStatus` when the paywall next appears.
 
+### Sandbox test data (`debug`)
+
+Testing an influencer flow means redeeming real promo codes and making real (sandbox) purchases — which, without a marker, land in Helm as live activity that inflates redemption counts and shows up in an influencer's payout. `Helm.configure(debug:)` is that marker:
+
+```swift
+Helm.configure(
+    publishableKey: "pk_live_your_publishable_key",
+    baseURL: "https://helmcode.dev",
+    debug: true   // every attribution submission from this build is test data
+)
+```
+
+- **The parameter is optional and defaults to `false`.** A production build that never mentions `debug` sends live submissions, exactly as before — and every existing `Helm.configure(...)` call site keeps compiling unchanged. **Only a build that explicitly passes `debug: true` produces sandbox data**, so there is no way to accidentally mark production activity as test data.
+- **What it affects.** All three attribution submissions (`submitPromoCode`, `fetchAttributionStatus`, `submitOriginalTransactionId`) carry the flag. A promo-code link and a reported transaction created under `debug: true` are stamped as sandbox in Helm: they appear on the portal's sandbox views and are **permanently excluded from payouts, billing, and redemption counts**. Nothing else about the SDK's behavior changes — same endpoints, same responses, same errors. It is *not* a verbose-logging switch.
+- **Drive it from your build configuration**, not a runtime toggle:
+
+  ```swift
+  #if DEBUG
+  let helmDebug = true
+  #else
+  let helmDebug = false
+  #endif
+  ```
+
+  or, if you have multiple environments, map it off your own environment enum (`develop`/`qa` → `true`; `staging`/`production` → `false`).
+- **Queued submissions keep the flag they were created with.** A submission enqueued offline by a debug build replays as sandbox data even if the app has since been reconfigured as live — and a live submission is never re-badged as sandbox. The offline queue's dedupe key includes the flag, so the same code submitted in both environments is two distinct submissions.
+- **The status cache is environment-scoped.** The offline fallback in `fetchAttributionStatus` only serves a cached status confirmed under the *same* flag; a cross-environment entry is treated as a cache miss and throws `.network`, so a live build never renders an offering that was only confirmed against sandbox data.
+
 ## API Reference
 
 ### `Helm`
@@ -230,12 +263,17 @@ public enum Helm {
     ///   - publishableKey: Your project's publishable API key.
     ///   - baseURL: The Helm API host (e.g. "https://helmcode.dev").
     ///     Pass only scheme + host — the SDK appends the API path prefix.
+    ///   - debug: `true` registers every attribution submission from this
+    ///     build as sandbox test data in Helm; sandbox data is always
+    ///     excluded from payouts. Set it from your build configuration;
+    ///     default `false` keeps production builds safe.
     ///   - session: The `URLSession` used for all network requests.
     ///     Defaults to `.shared`. Inject a custom session for testing
     ///     or to provide a custom `URLSessionConfiguration`.
     public static func configure(
         publishableKey: String,
         baseURL: String,
+        debug: Bool = false,
         session: URLSession = .shared
     )
 
@@ -390,10 +428,10 @@ The SDK emits structured logs via Apple's unified logging system under the subsy
 Helm follows [Semantic Versioning](https://semver.org):
 
 - **Major** (`2.0.0`) — breaking API changes
-- **Minor** (`1.3.0`) — additive, backwards-compatible API
-- **Patch** (`1.3.1`) — backwards-compatible bug fixes
+- **Minor** (`1.4.0`) — additive, backwards-compatible API
+- **Patch** (`1.4.1`) — backwards-compatible bug fixes
 
-The current release is **1.3.0**. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+The current release is **1.4.0**. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ### Tagging convention
 

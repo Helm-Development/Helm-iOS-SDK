@@ -4,6 +4,37 @@ All notable changes to the Helm iOS SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-10
+
+Sandbox test data for influencer attribution. Additive and backwards-compatible —
+`debug` is a defaulted parameter, so existing `Helm.configure(...)` call sites keep
+compiling unchanged and keep sending live submissions.
+
+### Added
+- TAS-801: `debug` parameter on `Helm.configure(publishableKey:baseURL:debug:session:)`.
+  When `true`, every attribution submission this build makes is registered in Helm as
+  **sandbox test data** and is permanently excluded from payouts and billing. Defaults
+  to `false`, so a production build is safe without any change at the call site — set
+  it from your build configuration (e.g. `true` for develop/QA, `false` for
+  staging/production).
+- TAS-801: All three attribution request bodies (`promo-code`, `status`,
+  `transaction`) now always include a `debug` boolean read from the configuration.
+- TAS-801: Queued offline submissions **persist the marker they were created with**.
+  A submission enqueued by a debug build replays as sandbox data even if the app has
+  since been reconfigured as live, and vice versa. The queue's dedupe key is now
+  `(kind, userId, value, debug)` — the same value in two environments is two distinct
+  submissions.
+- TAS-801: The attribution status cache records the environment each entry was
+  confirmed under. An offline status read falls back to a cached entry only when it
+  came from the *same* environment; a cross-environment entry is treated as a miss
+  (`.network`), so a live paywall never renders an offering confirmed against sandbox
+  data.
+
+### Changed
+- TAS-801: `PendingSubmission` and `CachedStatus` decode `debug` with
+  `decodeIfPresent(_:forKey:) ?? false`, so a 1.3.0 queue or status cache already on
+  disk decodes as **live** on upgrade rather than being discarded.
+
 ## [1.3.0] - 2026-08-08
 
 Influencer promo-code attribution. Additive and backwards-compatible — no existing
@@ -137,7 +168,8 @@ them are behavioral changes worth reading before you upgrade:
 - `Helm.attribution.increment(_:metadata:)` for fire-and-forget event tracking.
 - Swift Package Manager support for iOS 15+ and macOS 12+.
 
-[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.3.0...HEAD
+[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.4.0...HEAD
+[1.4.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.3.0...1.4.0
 [1.3.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.2.0...1.3.0
 [1.2.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.1.2...1.2.0
 [0.3.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/v0.2.0...v0.3.0
