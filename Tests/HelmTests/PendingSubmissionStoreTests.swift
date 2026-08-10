@@ -33,11 +33,13 @@ final class PendingSubmissionStoreTests: XCTestCase {
     private func submission(kind: PendingSubmission.Kind = .promoCode,
                             userId: String = "user-1",
                             value: String = "ELYSIA",
-                            at offset: TimeInterval = 0) -> PendingSubmission {
+                            at offset: TimeInterval = 0,
+                            debug: Bool = false) -> PendingSubmission {
         PendingSubmission(kind: kind,
                           userId: userId,
                           value: value,
-                          enqueuedAt: now.addingTimeInterval(offset))
+                          enqueuedAt: now.addingTimeInterval(offset),
+                          debug: debug)
     }
 
     // MARK: - Persistence
@@ -102,6 +104,59 @@ final class PendingSubmissionStoreTests: XCTestCase {
         store.enqueue(submission(kind: .promoCode, userId: "user-2", value: "SHARED"))
 
         XCTAssertEqual(store.count, 3, "Dedupe key is (kind, userId, value) — not value alone")
+    }
+
+    // MARK: - TAS-801 debug marker
+
+    func test_debug_marker_round_trips_through_userdefaults() {
+        let entry = submission(kind: .transaction, value: "2000000123456789", debug: true)
+        store.enqueue(entry)
+
+        let reopened = PendingSubmissionStore(defaults: defaults, now: { [weak self] in self?.now ?? Date() })
+        let all = reopened.all()
+
+        XCTAssertEqual(all.count, 1)
+        XCTAssertEqual(all.first?.debug, true, "The sandbox marker must survive the Codable round-trip")
+        XCTAssertEqual(all.first, entry)
+    }
+
+    /// A 1.3.0 queue on disk has no `debug` key. It must decode as **live** — and
+    /// crucially it must decode at all: `readLocked()` discards the entire queue
+    /// on a decode failure, so a throwing `init(from:)` would wipe every
+    /// submission an offline device had accumulated before the upgrade.
+    func test_legacy_entry_without_the_debug_key_decodes_as_live() throws {
+        let legacy: [[String: Any]] = [[
+            "id": "legacy-id",
+            "kind": "promo_code",
+            "userId": "user-1",
+            "value": "ELYSIA",
+            "enqueuedAt": now.timeIntervalSince1970,
+        ]]
+        defaults.set(try JSONSerialization.data(withJSONObject: legacy),
+                     forKey: "helm_attribution_pending_submissions")
+
+        let all = store.all()
+
+        XCTAssertEqual(all.count, 1, "A 1.3.0 queue must not be discarded on upgrade")
+        XCTAssertEqual(all.first?.id, "legacy-id")
+        XCTAssertEqual(all.first?.value, "ELYSIA")
+        XCTAssertEqual(all.first?.debug, false, "A pre-flag entry replays as live data")
+    }
+
+    func test_same_submission_under_a_different_debug_marker_is_kept() {
+        store.enqueue(submission(value: "SHARED", debug: false))
+        store.enqueue(submission(value: "SHARED", debug: true))
+
+        XCTAssertEqual(store.count, 2,
+                       "Dedupe key includes `debug` — the same code in two environments is two submissions")
+        XCTAssertEqual(store.all().map(\.debug), [false, true])
+    }
+
+    func test_identical_submission_including_debug_still_dedupes() {
+        store.enqueue(submission(value: "SHARED", debug: true))
+        store.enqueue(submission(value: "SHARED", debug: true))
+
+        XCTAssertEqual(store.count, 1)
     }
 
     // MARK: - Retention (30 days)

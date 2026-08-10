@@ -23,17 +23,43 @@ internal struct PendingSubmission: Codable, Equatable, Sendable {
     /// The promo code, or the StoreKit original transaction id.
     let value: String
     let enqueuedAt: Date
+    /// TAS-801: the sandbox marker captured from the configuration **at enqueue
+    /// time**. A replay always sends this value, never the configuration's
+    /// current one, so a submission made by a debug build stays sandbox data
+    /// even if the app is later reconfigured as live (and vice versa).
+    let debug: Bool
 
     init(id: String = UUID().uuidString,
          kind: Kind,
          userId: String,
          value: String,
-         enqueuedAt: Date) {
+         enqueuedAt: Date,
+         debug: Bool = false) {
         self.id = id
         self.kind = kind
         self.userId = userId
         self.value = value
         self.enqueuedAt = enqueuedAt
+        self.debug = debug
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, userId, value, enqueuedAt, debug
+    }
+
+    /// TAS-801: hand-written decoding so a queue written by 1.3.0 (no `debug`
+    /// key) still decodes — as **live**. Mandatory, not defensive: a decode
+    /// failure makes `PendingSubmissionStore.readLocked()` discard the *entire*
+    /// queue, so a synthesized-memberwise `init(from:)` would silently drop
+    /// every submission an offline device had accumulated before the upgrade.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.kind = try container.decode(Kind.self, forKey: .kind)
+        self.userId = try container.decode(String.self, forKey: .userId)
+        self.value = try container.decode(String.self, forKey: .value)
+        self.enqueuedAt = try container.decode(Date.self, forKey: .enqueuedAt)
+        self.debug = try container.decodeIfPresent(Bool.self, forKey: .debug) ?? false
     }
 }
 
@@ -86,9 +112,13 @@ internal final class PendingSubmissionStore: @unchecked Sendable {
 
     /// Append a submission to the queue.
     ///
-    /// Skips the append when an identical `(kind, userId, value)` entry is
-    /// already queued — replay is idempotent server-side, so duplicates would
+    /// Skips the append when an identical `(kind, userId, value, debug)` entry
+    /// is already queued — replay is idempotent server-side, so duplicates would
     /// be harmless but wasteful.
+    ///
+    /// TAS-801: `debug` is part of the key. The same value submitted under a
+    /// different sandbox marker is a distinct logical submission — collapsing
+    /// the two would silently discard one environment's record.
     func enqueue(_ submission: PendingSubmission) {
         lock.lock()
         defer { lock.unlock() }
@@ -96,7 +126,10 @@ internal final class PendingSubmissionStore: @unchecked Sendable {
         var entries = pruneLocked()
 
         let isDuplicate = entries.contains {
-            $0.kind == submission.kind && $0.userId == submission.userId && $0.value == submission.value
+            $0.kind == submission.kind
+                && $0.userId == submission.userId
+                && $0.value == submission.value
+                && $0.debug == submission.debug
         }
         if isDuplicate {
             logger.info("pending submission already queued — skipping duplicate (kind=\(submission.kind.rawValue, privacy: .public))")

@@ -17,12 +17,17 @@ public enum Helm {
     ///     Pass only the scheme + host -- the SDK appends per-feature path
     ///     prefixes internally (attribution uses `/api/client/v1/...`;
     ///     analytics uses `/api/v1/...`).
+    ///   - debug: `true` registers every attribution submission (promo-code
+    ///     link, status, transaction) as sandbox test data in Helm; sandbox data
+    ///     is always excluded from payouts. Set it from your build
+    ///     configuration; default `false` keeps production builds safe.
     ///   - session: The `URLSession` used for all network requests. Defaults to
     ///     `.shared`. Inject a custom session for testing or to provide custom
     ///     `URLSessionConfiguration` (timeouts, headers, etc.).
     public static func configure(
         publishableKey: String,
         baseURL: String,
+        debug: Bool = false,
         session: URLSession = .shared
     ) {
         if Configuration.shared != nil {
@@ -31,6 +36,7 @@ public enum Helm {
         Configuration.shared = Configuration(
             publishableKey: publishableKey,
             baseURL: baseURL,
+            debug: debug,
             session: session
         )
 

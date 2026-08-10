@@ -9,6 +9,39 @@ internal struct CachedStatus: Codable, Equatable, Sendable {
     let influencerCode: String?
     let offeringId: String?
     let fetchedAt: Date
+    /// TAS-801: the sandbox marker the status was fetched (or linked) under.
+    /// Storage stays keyed per-`userId`; a read whose environment doesn't match
+    /// the current configuration is treated as a **miss** rather than served, so
+    /// a live paywall never renders an offering confirmed against sandbox data.
+    let debug: Bool
+
+    init(isLinked: Bool,
+         influencerCode: String?,
+         offeringId: String?,
+         fetchedAt: Date,
+         debug: Bool = false) {
+        self.isLinked = isLinked
+        self.influencerCode = influencerCode
+        self.offeringId = offeringId
+        self.fetchedAt = fetchedAt
+        self.debug = debug
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case isLinked, influencerCode, offeringId, fetchedAt, debug
+    }
+
+    /// TAS-801: same reasoning as `PendingSubmission` — a 1.3.0 cache entry has
+    /// no `debug` key and must decode as live instead of wiping the whole cache
+    /// (`readLocked()` resets on any decode failure).
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.isLinked = try container.decode(Bool.self, forKey: .isLinked)
+        self.influencerCode = try container.decodeIfPresent(String.self, forKey: .influencerCode)
+        self.offeringId = try container.decodeIfPresent(String.self, forKey: .offeringId)
+        self.fetchedAt = try container.decode(Date.self, forKey: .fetchedAt)
+        self.debug = try container.decodeIfPresent(Bool.self, forKey: .debug) ?? false
+    }
 }
 
 /// Caches the last successful attribution status **per userId** so a paywall can

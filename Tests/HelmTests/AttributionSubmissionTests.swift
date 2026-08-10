@@ -52,13 +52,15 @@ final class AttributionSubmissionTests: XCTestCase {
                     installationId: { Self.installationId })
     }
 
-    private func configureSDK(responder: @escaping (URLRequest) -> SubmissionMockURLProtocol.Outcome) {
+    private func configureSDK(debug: Bool = false,
+                              responder: @escaping (URLRequest) -> SubmissionMockURLProtocol.Outcome) {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [SubmissionMockURLProtocol.self]
         let session = URLSession(configuration: config)
         SubmissionMockURLProtocol.responder = responder
         Helm.configure(publishableKey: "test-key",
                        baseURL: Self.baseURL,
+                       debug: debug,
                        session: session)
     }
 
@@ -108,7 +110,28 @@ final class AttributionSubmissionTests: XCTestCase {
         SubmissionMockURLProtocol.receivedRequests.map { Self.path(of: $0) }
     }
 
+    /// Raw JSON text of every request that hit the given path, in arrival order.
+    /// TAS-801 asserts on this as well as the parsed dictionary: the backend
+    /// reads `data.get('debug') is True`, so `"debug"` has to be on the wire as a
+    /// JSON boolean — `JSONSerialization` would happily parse `1` or `"true"`
+    /// into something that casts to `Bool` in Swift but registers as live server-side.
+    private func rawBodies(forPath path: String) -> [String] {
+        SubmissionMockURLProtocol.receivedRequests
+            .filter { Self.path(of: $0) == path }
+            .compactMap { rawBodyFromRequest($0) }
+    }
+
+    private func rawBodyFromRequest(_ request: URLRequest) -> String? {
+        guard let data = dataFromRequest(request) else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
     private func bodyFromRequest(_ request: URLRequest) -> [String: Any]? {
+        guard let data = dataFromRequest(request) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private func dataFromRequest(_ request: URLRequest) -> Data? {
         // URLSession strips httpBody when handing the request to URLProtocol;
         // bodyStream survives.
         if let stream = request.httpBodyStream {
@@ -122,12 +145,9 @@ final class AttributionSubmissionTests: XCTestCase {
                 if read <= 0 { break }
                 data.append(buffer, count: read)
             }
-            return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            return data
         }
-        if let body = request.httpBody {
-            return (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
-        }
-        return nil
+        return request.httpBody
     }
 
     /// Poll until `condition` holds or ~2 s elapse.
@@ -190,6 +210,191 @@ final class AttributionSubmissionTests: XCTestCase {
         XCTAssertEqual(body["original_transaction_id"] as? String, "2000000123456789")
         XCTAssertEqual(body["platform"] as? String, AnalyticsClient.platformName())
         XCTAssertEqual(body["device_id"] as? String, Self.installationId)
+    }
+
+    // MARK: - 2b. TAS-801 `debug` marker on all three bodies
+
+    /// Backwards compatibility, pinned at the source level: both 1.3.0
+    /// `configure` shapes must keep compiling *and* must keep producing live
+    /// submissions. These two calls are literally the pre-TAS-801 signatures —
+    /// if `debug` ever stops being a defaulted parameter, this stops building.
+    func test_pre_1_4_0_configure_call_shapes_still_compile_and_default_to_live() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [SubmissionMockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        SubmissionMockURLProtocol.responder = { _ in Self.json(Self.linkedSuccess) }
+
+        // 1.3.0 shape A: (publishableKey:baseURL:)
+        Helm.configure(publishableKey: "test-key", baseURL: Self.baseURL)
+        XCTAssertEqual(Configuration.shared?.debug, false,
+                       "An integrator who never mentions `debug` must stay live")
+
+        // 1.3.0 shape B: (publishableKey:baseURL:session:)
+        Helm.configure(publishableKey: "test-key", baseURL: Self.baseURL, session: session)
+        XCTAssertEqual(Configuration.shared?.debug, false)
+
+        _ = try await attribution.submitPromoCode(userId: Self.userId, code: "elysia")
+
+        let body = try XCTUnwrap(bodies(forPath: APIPath.attributionPromoCode).first)
+        XCTAssertEqual(body["debug"] as? Bool, false)
+    }
+
+    /// Production safety: an integrator who never touches the new parameter must
+    /// keep sending live submissions — and must send the field explicitly rather
+    /// than omitting it, so the wire contract is unambiguous.
+    func test_promo_code_body_carries_debug_false_by_default() async throws {
+        configureSDK { _ in Self.json(Self.linkedSuccess) }
+
+        _ = try await attribution.submitPromoCode(userId: Self.userId, code: "elysia")
+
+        let body = try XCTUnwrap(bodies(forPath: APIPath.attributionPromoCode).first)
+        XCTAssertEqual(body["debug"] as? Bool, false)
+        let raw = try XCTUnwrap(rawBodies(forPath: APIPath.attributionPromoCode).first)
+        XCTAssertTrue(raw.contains("\"debug\":false"),
+                      "`debug` must be a JSON boolean — the server tests `is True`; got \(raw)")
+    }
+
+    func test_status_body_carries_debug_false_by_default() async throws {
+        configureSDK { _ in Self.json(["linked": false]) }
+
+        _ = try await attribution.fetchAttributionStatus(userId: Self.userId)
+
+        let body = try XCTUnwrap(bodies(forPath: APIPath.attributionStatus).first)
+        XCTAssertEqual(body["debug"] as? Bool, false)
+        let raw = try XCTUnwrap(rawBodies(forPath: APIPath.attributionStatus).first)
+        XCTAssertTrue(raw.contains("\"debug\":false"), "got \(raw)")
+    }
+
+    func test_transaction_body_carries_debug_false_by_default() async throws {
+        configureSDK { _ in Self.json(["ok": true]) }
+
+        await attribution._submitOriginalTransactionId(userId: Self.userId,
+                                                       originalTransactionId: "2000000123456789")
+
+        let body = try XCTUnwrap(bodies(forPath: APIPath.attributionTransaction).first)
+        XCTAssertEqual(body["debug"] as? Bool, false)
+        let raw = try XCTUnwrap(rawBodies(forPath: APIPath.attributionTransaction).first)
+        XCTAssertTrue(raw.contains("\"debug\":false"), "got \(raw)")
+    }
+
+    func test_promo_code_body_carries_debug_true_when_configured_debug() async throws {
+        configureSDK(debug: true) { _ in Self.json(Self.linkedSuccess) }
+
+        _ = try await attribution.submitPromoCode(userId: Self.userId, code: "elysia")
+
+        let body = try XCTUnwrap(bodies(forPath: APIPath.attributionPromoCode).first)
+        XCTAssertEqual(body["debug"] as? Bool, true)
+        let raw = try XCTUnwrap(rawBodies(forPath: APIPath.attributionPromoCode).first)
+        XCTAssertTrue(raw.contains("\"debug\":true"), "got \(raw)")
+    }
+
+    func test_status_body_carries_debug_true_when_configured_debug() async throws {
+        configureSDK(debug: true) { _ in Self.json(["linked": false]) }
+
+        _ = try await attribution.fetchAttributionStatus(userId: Self.userId)
+
+        let body = try XCTUnwrap(bodies(forPath: APIPath.attributionStatus).first)
+        XCTAssertEqual(body["debug"] as? Bool, true)
+        let raw = try XCTUnwrap(rawBodies(forPath: APIPath.attributionStatus).first)
+        XCTAssertTrue(raw.contains("\"debug\":true"), "got \(raw)")
+    }
+
+    func test_transaction_body_carries_debug_true_when_configured_debug() async throws {
+        configureSDK(debug: true) { _ in Self.json(["ok": true]) }
+
+        await attribution._submitOriginalTransactionId(userId: Self.userId,
+                                                       originalTransactionId: "2000000123456789")
+
+        let body = try XCTUnwrap(bodies(forPath: APIPath.attributionTransaction).first)
+        XCTAssertEqual(body["debug"] as? Bool, true)
+        let raw = try XCTUnwrap(rawBodies(forPath: APIPath.attributionTransaction).first)
+        XCTAssertTrue(raw.contains("\"debug\":true"), "got \(raw)")
+    }
+
+    /// The whole point of persisting the marker: a submission queued by a debug
+    /// build must still register as sandbox data when it finally lands, even
+    /// though the app has since been reconfigured as live.
+    func test_queued_promo_code_replays_with_the_marker_it_was_enqueued_with() async throws {
+        configureSDK(debug: true) { _ in Self.serverFailure() }
+        let queued = try await attribution.submitPromoCode(userId: Self.userId, code: "elysia")
+        XCTAssertEqual(queued, .queued)
+        XCTAssertEqual(pendingStore.all().first?.debug, true,
+                       "The enqueued entry must capture the configured marker")
+
+        SubmissionMockURLProtocol.reset()
+        configureSDK(debug: false) { _ in Self.json(Self.linkedSuccess) }
+
+        await attribution._replayPendingSubmissions()
+
+        let replayed = try XCTUnwrap(bodies(forPath: APIPath.attributionPromoCode).first)
+        XCTAssertEqual(replayed["debug"] as? Bool, true,
+                       "A replay must send the queued marker, not the current configuration's")
+        XCTAssertEqual(pendingStore.count, 0)
+    }
+
+    func test_queued_transaction_replays_with_the_marker_it_was_enqueued_with() async throws {
+        configureSDK(debug: true) { _ in .failure(URLError(.timedOut)) }
+        await attribution._submitOriginalTransactionId(userId: Self.userId,
+                                                       originalTransactionId: "2000000123456789")
+        XCTAssertEqual(pendingStore.all().first?.debug, true)
+
+        SubmissionMockURLProtocol.reset()
+        configureSDK(debug: false) { _ in Self.json(["ok": true]) }
+
+        await attribution._replayPendingSubmissions()
+
+        let replayed = try XCTUnwrap(bodies(forPath: APIPath.attributionTransaction).first)
+        XCTAssertEqual(replayed["debug"] as? Bool, true)
+        XCTAssertEqual(pendingStore.count, 0)
+    }
+
+    /// The mirror case — a live submission queued before someone flips the build
+    /// to debug must not be re-badged as sandbox on replay.
+    func test_queued_live_submission_is_not_rebadged_as_sandbox_on_replay() async throws {
+        configureSDK(debug: false) { _ in Self.serverFailure() }
+        _ = try await attribution.submitPromoCode(userId: Self.userId, code: "elysia")
+        XCTAssertEqual(pendingStore.all().first?.debug, false)
+
+        SubmissionMockURLProtocol.reset()
+        configureSDK(debug: true) { _ in Self.json(Self.linkedSuccess) }
+
+        await attribution._replayPendingSubmissions()
+
+        let replayed = try XCTUnwrap(bodies(forPath: APIPath.attributionPromoCode).first)
+        XCTAssertEqual(replayed["debug"] as? Bool, false)
+    }
+
+    /// TAS-801: the status cache is environment-scoped. A sandbox-confirmed
+    /// status must not satisfy a live build's offline read — that would put an
+    /// influencer offering in front of a paying user on the strength of test data.
+    func test_cached_status_from_the_other_environment_is_treated_as_a_miss() async throws {
+        configureSDK(debug: true) { _ in Self.json(Self.linkedSuccess) }
+        _ = try await attribution.fetchAttributionStatus(userId: Self.userId)
+        XCTAssertEqual(statusCache.status(for: Self.userId)?.debug, true)
+
+        SubmissionMockURLProtocol.reset()
+        configureSDK(debug: false) { _ in .failure(URLError(.notConnectedToInternet)) }
+
+        do {
+            _ = try await attribution.fetchAttributionStatus(userId: Self.userId)
+            XCTFail("A sandbox-confirmed status must not be served to a live build")
+        } catch {
+            XCTAssertEqual(error as? HelmAttributionError, .network)
+        }
+    }
+
+    func test_cached_status_from_the_same_environment_is_still_served() async throws {
+        configureSDK(debug: true) { _ in Self.json(Self.linkedSuccess) }
+        _ = try await attribution.fetchAttributionStatus(userId: Self.userId)
+
+        SubmissionMockURLProtocol.reset()
+        configureSDK(debug: true) { _ in .failure(URLError(.notConnectedToInternet)) }
+
+        let status = try await attribution.fetchAttributionStatus(userId: Self.userId)
+
+        XCTAssertTrue(status.fromCache)
+        XCTAssertEqual(status.offeringId, "inf_monthly",
+                       "Environment-matching entries must keep the offline fallback working")
     }
 
     // MARK: - 3. submitPromoCode success

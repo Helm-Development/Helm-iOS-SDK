@@ -29,8 +29,13 @@ final class AttributionStatusCacheTests: XCTestCase {
     private func status(isLinked: Bool = true,
                         code: String? = "elysia",
                         offering: String? = "inf_monthly",
-                        fetchedAt: Date = Date(timeIntervalSince1970: 1_800_000_000)) -> CachedStatus {
-        CachedStatus(isLinked: isLinked, influencerCode: code, offeringId: offering, fetchedAt: fetchedAt)
+                        fetchedAt: Date = Date(timeIntervalSince1970: 1_800_000_000),
+                        debug: Bool = false) -> CachedStatus {
+        CachedStatus(isLinked: isLinked,
+                     influencerCode: code,
+                     offeringId: offering,
+                     fetchedAt: fetchedAt,
+                     debug: debug)
     }
 
     // MARK: - Round-trip
@@ -54,6 +59,37 @@ final class AttributionStatusCacheTests: XCTestCase {
         cache.store(value, for: "user-1")
 
         XCTAssertEqual(cache.status(for: "user-1"), value)
+    }
+
+    // MARK: - TAS-801 debug marker
+
+    /// The marker has to survive persistence for the environment-mismatch check
+    /// in `Attribution.fetchAttributionStatus` to have anything to compare.
+    func test_debug_marker_round_trips_through_userdefaults() {
+        cache.store(status(debug: true), for: "user-1")
+
+        let reopened = AttributionStatusCache(defaults: defaults)
+        XCTAssertEqual(reopened.status(for: "user-1")?.debug, true)
+    }
+
+    /// A 1.3.0 cache entry has no `debug` key; it must decode as live rather than
+    /// failing and taking the whole cache down with it.
+    func test_legacy_entry_without_the_debug_key_decodes_as_live() throws {
+        let legacy: [String: Any] = [
+            "user-1": [
+                "isLinked": true,
+                "influencerCode": "elysia",
+                "offeringId": "inf_monthly",
+                "fetchedAt": 1_800_000_000,
+            ],
+        ]
+        defaults.set(try JSONSerialization.data(withJSONObject: legacy),
+                     forKey: "helm_attribution_status_cache")
+
+        let cached = try XCTUnwrap(cache.status(for: "user-1"),
+                                   "A 1.3.0 cache must not be discarded on upgrade")
+        XCTAssertEqual(cached.influencerCode, "elysia")
+        XCTAssertEqual(cached.debug, false)
     }
 
     // MARK: - Per-user isolation

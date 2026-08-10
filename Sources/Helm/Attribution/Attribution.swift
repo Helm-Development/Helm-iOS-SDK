@@ -370,12 +370,16 @@ public final class Attribution: @unchecked Sendable {
         // before this call's own verdict is computed.
         await _replayPendingSubmissions()
 
+        // TAS-801: snapshot the marker once so the request body and any queued
+        // entry that follows a transport failure agree on the environment.
+        let debug = currentDebug()
+
         do {
             let response = try await HelmHTTPClient.post(
                 path: APIPath.attributionPromoCode,
-                body: promoCodeBody(userId: userId, code: code)
+                body: promoCodeBody(userId: userId, code: code, debug: debug)
             )
-            return try promoCodeResult(from: response, userId: userId, submittedCode: code)
+            return try promoCodeResult(from: response, userId: userId, submittedCode: code, debug: debug)
         } catch let error as HelmAttributionError {
             // Thrown by response parsing — already public-surface shaped.
             throw error
@@ -385,7 +389,8 @@ public final class Attribution: @unchecked Sendable {
                 pendingStore.enqueue(PendingSubmission(kind: .promoCode,
                                                        userId: userId,
                                                        value: code,
-                                                       enqueuedAt: Date()))
+                                                       enqueuedAt: Date(),
+                                                       debug: debug))
                 logger.info("promo-code submission queued for replay — transport failure")
                 return .queued
             case .terminal(let mapped):
@@ -415,10 +420,12 @@ public final class Attribution: @unchecked Sendable {
 
         await _replayPendingSubmissions()
 
+        let debug = currentDebug()
+
         do {
             let response = try await HelmHTTPClient.post(
                 path: APIPath.attributionStatus,
-                body: statusBody(userId: userId)
+                body: statusBody(userId: userId, debug: debug)
             )
             guard let isLinked = response["linked"] as? Bool else {
                 throw HelmAttributionError.invalidResponse
@@ -428,7 +435,8 @@ public final class Attribution: @unchecked Sendable {
             statusCache.store(CachedStatus(isLinked: isLinked,
                                            influencerCode: influencerCode,
                                            offeringId: offeringId,
-                                           fetchedAt: Date()),
+                                           fetchedAt: Date(),
+                                           debug: debug),
                               for: userId)
             return AttributionStatus(isLinked: isLinked,
                                      influencerCode: influencerCode,
@@ -439,7 +447,10 @@ public final class Attribution: @unchecked Sendable {
         } catch {
             switch AttributionErrorMapper.classify(error) {
             case .transport:
-                if let cached = statusCache.status(for: userId) {
+                // TAS-801: a cached entry from the other environment is a miss.
+                // Serving a sandbox-confirmed status to a live build (or the
+                // reverse) would put the wrong offering in front of the user.
+                if let cached = statusCache.status(for: userId), cached.debug == debug {
                     logger.info("attribution status served from cache — network unreachable")
                     return AttributionStatus(isLinked: cached.isLinked,
                                              influencerCode: cached.influencerCode,
@@ -485,10 +496,14 @@ public final class Attribution: @unchecked Sendable {
 
         await _replayPendingSubmissions()
 
+        let debug = currentDebug()
+
         do {
             _ = try await HelmHTTPClient.post(
                 path: APIPath.attributionTransaction,
-                body: transactionBody(userId: userId, originalTransactionId: originalTransactionId)
+                body: transactionBody(userId: userId,
+                                      originalTransactionId: originalTransactionId,
+                                      debug: debug)
             )
         } catch {
             switch AttributionErrorMapper.classify(error) {
@@ -496,7 +511,8 @@ public final class Attribution: @unchecked Sendable {
                 pendingStore.enqueue(PendingSubmission(kind: .transaction,
                                                        userId: userId,
                                                        value: originalTransactionId,
-                                                       enqueuedAt: Date()))
+                                                       enqueuedAt: Date(),
+                                                       debug: debug))
                 logger.info("transaction submission queued for replay — transport failure")
             case .terminal(let mapped):
                 logger.error("transaction submission rejected — dropped: \(mapped.localizedDescription, privacy: .public)")
@@ -539,10 +555,14 @@ public final class Attribution: @unchecked Sendable {
             switch entry.kind {
             case .promoCode:
                 path = APIPath.attributionPromoCode
-                body = promoCodeBody(userId: entry.userId, code: entry.value)
+                // TAS-801: `entry.debug`, never `currentDebug()` — the queued
+                // submission keeps the environment it was created in.
+                body = promoCodeBody(userId: entry.userId, code: entry.value, debug: entry.debug)
             case .transaction:
                 path = APIPath.attributionTransaction
-                body = transactionBody(userId: entry.userId, originalTransactionId: entry.value)
+                body = transactionBody(userId: entry.userId,
+                                       originalTransactionId: entry.value,
+                                       debug: entry.debug)
             }
 
             do {
@@ -555,7 +575,8 @@ public final class Attribution: @unchecked Sendable {
                     statusCache.store(CachedStatus(isLinked: true,
                                                    influencerCode: influencerCode,
                                                    offeringId: response["offering_id"] as? String,
-                                                   fetchedAt: Date()),
+                                                   fetchedAt: Date(),
+                                                   debug: entry.debug),
                                       for: entry.userId)
                 }
                 logger.info("replayed queued \(entry.kind.rawValue, privacy: .public) submission")
@@ -593,35 +614,51 @@ public final class Attribution: @unchecked Sendable {
     /// `platform` and `device_id` are auto-included on all three attribution
     /// submission endpoints so the backend can reconcile a submission with the
     /// install that made it.
-    private func promoCodeBody(userId: String, code: String) -> [String: Any] {
+    ///
+    /// TAS-801: `debug` is included on all three bodies, always, as a real
+    /// boolean — the backend reads `data.get('debug') is True`, so a string or a
+    /// number would silently register as live. Fresh calls pass
+    /// `currentDebug()`; a replay passes the marker the entry was enqueued with.
+    private func promoCodeBody(userId: String, code: String, debug: Bool) -> [String: Any] {
         [
             "user_id": userId,
             "code": code,
             "platform": AnalyticsClient.platformName(),
             "device_id": installationId(),
+            "debug": debug,
         ]
     }
 
-    private func statusBody(userId: String) -> [String: Any] {
+    private func statusBody(userId: String, debug: Bool) -> [String: Any] {
         [
             "user_id": userId,
             "platform": AnalyticsClient.platformName(),
             "device_id": installationId(),
+            "debug": debug,
         ]
     }
 
-    private func transactionBody(userId: String, originalTransactionId: String) -> [String: Any] {
+    private func transactionBody(userId: String, originalTransactionId: String, debug: Bool) -> [String: Any] {
         [
             "user_id": userId,
             "original_transaction_id": originalTransactionId,
             "platform": AnalyticsClient.platformName(),
             "device_id": installationId(),
+            "debug": debug,
         ]
+    }
+
+    /// TAS-801: the sandbox marker of the *current* configuration. Read at call
+    /// time (never cached) and `false` whenever the SDK is unconfigured, so the
+    /// production-safe default holds on every path.
+    private func currentDebug() -> Bool {
+        Configuration.shared?.debug ?? false
     }
 
     private func promoCodeResult(from response: [String: Any],
                                  userId: String,
-                                 submittedCode: String) throws -> PromoCodeResult {
+                                 submittedCode: String,
+                                 debug: Bool) throws -> PromoCodeResult {
         guard let linked = response["linked"] as? Bool, linked else {
             throw HelmAttributionError.invalidResponse
         }
@@ -630,7 +667,8 @@ public final class Attribution: @unchecked Sendable {
         statusCache.store(CachedStatus(isLinked: true,
                                        influencerCode: influencerCode,
                                        offeringId: offeringId,
-                                       fetchedAt: Date()),
+                                       fetchedAt: Date(),
+                                       debug: debug),
                           for: userId)
         return .linked(influencerCode: influencerCode, offeringId: offeringId)
     }

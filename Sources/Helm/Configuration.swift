@@ -29,12 +29,22 @@ internal final class Configuration: @unchecked Sendable {
     /// The Helm API base URL (e.g. "https://helmcode.dev").
     let baseURL: String
 
+    /// TAS-801: when `true`, every attribution submission this build makes is
+    /// registered in Helm as **sandbox test data** (wire field `debug`) and is
+    /// permanently excluded from payouts and billing. Defaults to `false` so a
+    /// production build is safe without any change at the call site.
+    let debug: Bool
+
     /// The URLSession used for all network requests. Injectable for testing.
     let session: URLSession
 
-    init(publishableKey: String, baseURL: String, session: URLSession = .shared) {
+    init(publishableKey: String,
+         baseURL: String,
+         debug: Bool = false,
+         session: URLSession = .shared) {
         self.publishableKey = publishableKey
         self.baseURL = baseURL
+        self.debug = debug
         self.session = session
     }
 }
