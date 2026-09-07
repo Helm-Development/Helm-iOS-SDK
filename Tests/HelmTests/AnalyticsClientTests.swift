@@ -45,6 +45,27 @@ final class AnalyticsClientTests: XCTestCase {
                      "attribution_token must be absent when empty string")
     }
 
+    // MARK: - Debug marker (HELM-237)
+
+    func testRegistrationBodyMarksADebugBuild() {
+        let body = AnalyticsClient.registrationBody(
+            installationId: "iid",
+            userHash: "hash",
+            debug: true
+        )
+        XCTAssertEqual(body["debug"] as? Bool, true,
+                       "a debug build must register as debug so Helm leaves it out of active-user counts")
+    }
+
+    func testRegistrationBodyDefaultsToLive() {
+        let body = AnalyticsClient.registrationBody(
+            installationId: "iid",
+            userHash: "hash"
+        )
+        XCTAssertEqual(body["debug"] as? Bool, false,
+                       "an unconfigured build counts as a real user, matching the server default")
+    }
+
     func testEventsBodyShape() {
         let event = AnalyticsEvent(eventName: "tapped",
                                    occurredAt: Date(),

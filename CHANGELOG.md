@@ -4,6 +4,20 @@ All notable changes to the Helm iOS SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-09-07
+
+The `debug` flag now reaches analytics as well as attribution. Additive and
+backwards-compatible — no call site changes, and a build that never sets `debug`
+keeps registering as a live user.
+
+### Added
+- HELM-237: installation registration now sends the configured `debug` boolean,
+  the same wire field the attribution endpoints already take. Helm leaves activity
+  from a debug build out of its daily, weekly, and monthly active-user counts, so
+  a developer running the app all day no longer shows up as a real user. The flag
+  is sent on every registration, including when `false`, so a device that moves
+  from a debug build to a shipped one counts as live again.
+
 ## [1.4.0] - 2026-08-10
 
 Sandbox test data for influencer attribution. Additive and backwards-compatible —
