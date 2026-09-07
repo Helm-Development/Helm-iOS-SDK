@@ -32,7 +32,7 @@ final class AnalyticsTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func configureWithMockSession() {
+    private func configureWithMockSession(debug: Bool = false, environment: String = "production") {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [AnalyticsMockURLProtocol.self]
         let session = URLSession(configuration: config)
@@ -46,7 +46,11 @@ final class AnalyticsTests: XCTestCase {
             )!
             return (response, body)
         }
-        Helm.configure(publishableKey: "pk_test", baseURL: "https://example.invalid", session: session)
+        Helm.configure(publishableKey: "pk_test",
+                       baseURL: "https://example.invalid",
+                       debug: debug,
+                       environment: environment,
+                       session: session)
     }
 
     private func bodyFromRequest(_ request: URLRequest) -> [String: Any]? {
@@ -110,6 +114,58 @@ final class AnalyticsTests: XCTestCase {
 
     func testHelmFacadeExposesAnalytics() {
         XCTAssertTrue(Helm.analytics === Analytics.shared)
+    }
+
+    // MARK: - HELM-241: debug and environment on registration and events
+
+    /// A build configured with `debug: true, environment: "staging"` must send
+    /// both on registration.
+    func testRegistrationCarriesConfiguredDebugAndEnvironment() async throws {
+        configureWithMockSession(debug: true, environment: "staging")
+        let analytics = makeAnalytics()
+        analytics.start()
+
+        for _ in 0..<100 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            if !AnalyticsMockURLProtocol.receivedRequests.isEmpty { break }
+        }
+
+        let body = bodyFromRequest(try XCTUnwrap(AnalyticsMockURLProtocol.receivedRequests.first))
+        XCTAssertEqual(body?["debug"] as? Bool, true)
+        XCTAssertEqual(body?["environment"] as? String, "staging")
+    }
+
+    /// An event queued before a reconfiguration keeps the values in force when
+    /// it was created, not the ones in force at flush time.
+    func testQueuedEventKeepsTheValuesItWasCreatedWith() async throws {
+        configureWithMockSession(debug: true, environment: "staging")
+        let analytics = makeAnalytics()
+        analytics.start()
+        analytics.track("tapped")
+
+        // Reconfigure to a live production build before the batch is flushed.
+        configureWithMockSession(debug: false, environment: "production")
+
+        analytics.flush()
+
+        for _ in 0..<100 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            if AnalyticsMockURLProtocol.receivedRequests.contains(where: {
+                $0.url?.absoluteString.contains(APIPath.analyticsEvents) == true
+            }) { break }
+        }
+
+        let eventsRequest = try XCTUnwrap(
+            AnalyticsMockURLProtocol.receivedRequests.last(where: { $0.url?.absoluteString.contains(APIPath.analyticsEvents) == true }),
+            "the flush must have posted an events batch"
+        )
+        let body = bodyFromRequest(eventsRequest)
+        let events = try XCTUnwrap(body?["events"] as? [[String: Any]])
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0]["debug"] as? Bool, true,
+                       "the event was tracked by a debug build and must stay debug")
+        XCTAssertEqual(events[0]["environment"] as? String, "staging",
+                       "the event was tracked on staging and must stay staging")
     }
 
     // MARK: - HELM-203 #1b: attribution_token handshake

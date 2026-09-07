@@ -35,16 +35,25 @@ internal final class Configuration: @unchecked Sendable {
     /// production build is safe without any change at the call site.
     let debug: Bool
 
+    /// HELM-241: a free-form label for the deployment environment this build
+    /// talks to, e.g. "production", "staging", "development". It is recorded on
+    /// every analytics event so activity can be filtered by environment. It is
+    /// independent of `debug`, which decides whether the activity counts as real
+    /// usage at all. Defaults to "production".
+    let environment: String
+
     /// The URLSession used for all network requests. Injectable for testing.
     let session: URLSession
 
     init(publishableKey: String,
          baseURL: String,
          debug: Bool = false,
+         environment: String = "production",
          session: URLSession = .shared) {
         self.publishableKey = publishableKey
         self.baseURL = baseURL
         self.debug = debug
+        self.environment = environment
         self.session = session
     }
 }

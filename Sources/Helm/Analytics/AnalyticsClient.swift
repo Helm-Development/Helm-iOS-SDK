@@ -33,7 +33,11 @@ internal enum AnalyticsClient {
 
     // MARK: - Payload builders (pure, unit-tested)
 
-    static func registrationBody(installationId: String, userHash: String, attributionToken: String? = nil) -> [String: Any] {
+    static func registrationBody(installationId: String,
+                                 userHash: String,
+                                 attributionToken: String? = nil,
+                                 debug: Bool = false,
+                                 environment: String = "production") -> [String: Any] {
         var dict: [String: Any] = [
             "installation_id": installationId,
             "platform": platformName(),
@@ -42,6 +46,15 @@ internal enum AnalyticsClient {
             "locale": localeIdentifier(),
             "timezone": TimeZone.current.identifier,
             "user_hash": userHash,
+            // HELM-237: the same `debug` wire field the attribution endpoints
+            // take (TAS-801). Helm leaves activity from a debug build out of its
+            // active-user counts. Always sent, including when false, so a device
+            // that moves from a debug build to a shipped one counts as live again.
+            "debug": debug,
+            // HELM-241: the deployment environment this build talks to. Sent on
+            // every registration so Helm can filter activity by environment.
+            // Independent of `debug`.
+            "environment": environment,
         ]
         // Include attribution_token only when non-empty; mirrors Android AnalyticsClient.kt:58.
         if let token = attributionToken, !token.isEmpty {
@@ -63,10 +76,17 @@ internal enum AnalyticsClient {
     /// the SDK always echoes its stored hash so identity never regresses (spec §5).
     /// `attributionToken` is forwarded as `attribution_token` when non-empty so the
     /// server can close the Attribution → Installation pairing via `_close_attribution_pairing`.
+    /// The configured `debug` flag rides along so Helm can tell a developer's build
+    /// apart from a real user (HELM-237), and `environment` rides along so activity
+    /// can be filtered by deployment environment (HELM-241).
     static func registerInstallation(installationId: String, userHash: String, attributionToken: String? = nil) async throws {
         _ = try await HelmHTTPClient.post(
             path: APIPath.analyticsInstallations,
-            body: registrationBody(installationId: installationId, userHash: userHash, attributionToken: attributionToken)
+            body: registrationBody(installationId: installationId,
+                                   userHash: userHash,
+                                   attributionToken: attributionToken,
+                                   debug: Configuration.shared?.debug ?? false,
+                                   environment: Configuration.shared?.environment ?? "production")
         )
     }
 

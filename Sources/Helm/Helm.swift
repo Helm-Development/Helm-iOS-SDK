@@ -21,6 +21,13 @@ public enum Helm {
     ///     link, status, transaction) as sandbox test data in Helm; sandbox data
     ///     is always excluded from payouts. Set it from your build
     ///     configuration; default `false` keeps production builds safe.
+    ///   - environment: A free-form label for the deployment environment this
+    ///     build talks to, e.g. "production", "staging", "development". It is
+    ///     recorded on every analytics event so activity can be filtered by
+    ///     environment. It is independent of `debug`, which controls whether the
+    ///     activity counts as real usage at all: a staging build can still be
+    ///     real usage, and a debug build can still be pointed at production.
+    ///     Defaults to "production".
     ///   - session: The `URLSession` used for all network requests. Defaults to
     ///     `.shared`. Inject a custom session for testing or to provide custom
     ///     `URLSessionConfiguration` (timeouts, headers, etc.).
@@ -28,6 +35,7 @@ public enum Helm {
         publishableKey: String,
         baseURL: String,
         debug: Bool = false,
+        environment: String = "production",
         session: URLSession = .shared
     ) {
         if Configuration.shared != nil {
@@ -37,6 +45,7 @@ public enum Helm {
             publishableKey: publishableKey,
             baseURL: baseURL,
             debug: debug,
+            environment: environment,
             session: session
         )
 

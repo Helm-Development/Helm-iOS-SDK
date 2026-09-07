@@ -152,6 +152,10 @@ public final class Attribution: @unchecked Sendable {
 
             var body = signals.toDict()
             body["device_id"] = deviceId
+            // HELM-241: `match` sends `debug` like the three influencer
+            // endpoints already do, so a debug build's match attempt is marked
+            // as sandbox data rather than live activity.
+            body["debug"] = currentDebug()
 
             let response = try await HelmHTTPClient.post(
                 path: APIPath.attributionMatch,
@@ -278,7 +282,10 @@ public final class Attribution: @unchecked Sendable {
             let rawId = store.rawAttributionId
 
             var body: [String: Any] = [
-                "event_type": eventType
+                "event_type": eventType,
+                // HELM-241: same `debug` marker the three influencer endpoints
+                // already send.
+                "debug": currentDebug(),
             ]
 
             // Send null when no attribution, otherwise send the stored ID.
