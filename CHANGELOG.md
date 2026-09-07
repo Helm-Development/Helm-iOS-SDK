@@ -6,9 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [1.5.0] - 2026-09-07
 
-The `debug` flag now reaches analytics as well as attribution. Additive and
-backwards-compatible — no call site changes, and a build that never sets `debug`
-keeps registering as a live user.
+The `debug` flag now reaches analytics as well as attribution, and a new
+`environment` label rides along with it. Additive and backwards-compatible —
+`environment` is a defaulted parameter, so every existing `Helm.configure(...)`
+call site keeps compiling unchanged, and a build that sets neither value
+registers as a live production user.
 
 ### Added
 - HELM-237: installation registration now sends the configured `debug` boolean,
@@ -17,6 +19,24 @@ keeps registering as a live user.
   a developer running the app all day no longer shows up as a real user. The flag
   is sent on every registration, including when `false`, so a device that moves
   from a debug build to a shipped one counts as live again.
+- HELM-241: `environment` parameter on
+  `Helm.configure(publishableKey:baseURL:debug:environment:session:)`. It is a
+  free-form label for the deployment environment the build talks to, e.g.
+  `"production"`, `"staging"`, `"development"`, and it defaults to
+  `"production"`. Helm records it on analytics activity so you can filter by
+  environment. It is independent of `debug`, which decides whether the activity
+  counts as real usage at all — a staging build can still be real usage, and a
+  debug build can still point at production.
+- HELM-241: installation registration sends `environment` alongside `debug`.
+- HELM-241: every object in the analytics `events[]` array now carries its own
+  `debug` and `environment`, captured when the event is created rather than when
+  the batch is flushed. An event queued under one configuration keeps its own
+  values even if the app is reconfigured before the flush — the same rule
+  TAS-801 already applies to queued attribution submissions.
+- HELM-241: the two older attribution endpoints, `match` and `event`, now send
+  `debug` too. The three influencer endpoints already did, so all five
+  attribution requests now carry the marker. `environment` is analytics-only and
+  is not sent on any attribution request.
 
 ## [1.4.0] - 2026-08-10
 

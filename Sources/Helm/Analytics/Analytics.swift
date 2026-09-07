@@ -123,10 +123,15 @@ public final class Analytics: @unchecked Sendable {
             logger.warning("track(\"\(name, privacy: .public)\") before start() — dropped")
             return
         }
+        // HELM-241: read `debug` and `environment` here, at creation, so the
+        // event carries the values in force when it happened rather than
+        // whatever the configuration says at flush time.
         let event = AnalyticsEvent(eventName: name,
                                    occurredAt: Date(),
                                    sessionId: sessionManager.sessionId,
-                                   properties: properties)
+                                   properties: properties,
+                                   debug: Configuration.shared?.debug ?? false,
+                                   environment: Configuration.shared?.environment ?? "production")
         if queue.enqueue(event) {
             flush()
         }

@@ -6,6 +6,14 @@ internal struct AnalyticsEvent {
     let occurredAt: Date
     let sessionId: String
     let properties: [String: Any]
+    /// HELM-241: the `debug` and `environment` values in force when this event
+    /// was created, not when the batch is flushed. An event queued under one
+    /// configuration keeps its own values even if the app is reconfigured before
+    /// the flush — the same rule TAS-801 applies to queued attribution
+    /// submissions in PendingSubmissionStore. Defaulted so tests and any other
+    /// caller can construct an event without naming them.
+    var debug: Bool = false
+    var environment: String = "production"
     /// True once this event has survived one failed flush; retried events
     /// are dropped rather than re-queued a second time (spec §6).
     var retried: Bool = false
@@ -20,6 +28,8 @@ internal struct AnalyticsEvent {
             "occurred_at": iso8601.string(from: occurredAt),
             "session_id": sessionId,
             "properties": properties,
+            "debug": debug,
+            "environment": environment,
         ]
     }
 }

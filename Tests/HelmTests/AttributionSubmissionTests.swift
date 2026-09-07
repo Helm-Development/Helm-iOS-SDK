@@ -212,6 +212,57 @@ final class AttributionSubmissionTests: XCTestCase {
         XCTAssertEqual(body["device_id"] as? String, Self.installationId)
     }
 
+    // MARK: - 2a. HELM-241 `debug` marker on match and event
+
+    /// HELM-241: `match` carries the same `debug` marker the three influencer
+    /// endpoints already send, so a debug build's match is not counted as live.
+    func test_match_body_carries_debug_true_when_configured_debug() async throws {
+        configureSDK(debug: true) { _ in Self.json(["matched": false]) }
+
+        await attribution._match()
+
+        let body = try XCTUnwrap(bodies(forPath: APIPath.attributionMatch).first)
+        XCTAssertEqual(body["debug"] as? Bool, true)
+        let raw = try XCTUnwrap(rawBodies(forPath: APIPath.attributionMatch).first)
+        XCTAssertTrue(raw.contains("\"debug\":true"),
+                      "`debug` must be a JSON boolean; got \(raw)")
+    }
+
+    func test_match_body_carries_debug_false_by_default() async throws {
+        configureSDK { _ in Self.json(["matched": false]) }
+
+        await attribution._match()
+
+        let body = try XCTUnwrap(bodies(forPath: APIPath.attributionMatch).first)
+        XCTAssertEqual(body["debug"] as? Bool, false)
+        let raw = try XCTUnwrap(rawBodies(forPath: APIPath.attributionMatch).first)
+        XCTAssertTrue(raw.contains("\"debug\":false"), "got \(raw)")
+    }
+
+    func test_event_body_carries_debug_true_when_configured_debug() async throws {
+        configureSDK(debug: true) { _ in Self.json(["ok": true]) }
+
+        attribution.increment("signup")
+        try await waitUntil { !self.bodies(forPath: APIPath.attributionEvent).isEmpty }
+
+        let body = try XCTUnwrap(bodies(forPath: APIPath.attributionEvent).first)
+        XCTAssertEqual(body["debug"] as? Bool, true)
+        let raw = try XCTUnwrap(rawBodies(forPath: APIPath.attributionEvent).first)
+        XCTAssertTrue(raw.contains("\"debug\":true"), "got \(raw)")
+    }
+
+    func test_event_body_carries_debug_false_by_default() async throws {
+        configureSDK { _ in Self.json(["ok": true]) }
+
+        attribution.increment("signup")
+        try await waitUntil { !self.bodies(forPath: APIPath.attributionEvent).isEmpty }
+
+        let body = try XCTUnwrap(bodies(forPath: APIPath.attributionEvent).first)
+        XCTAssertEqual(body["debug"] as? Bool, false)
+        let raw = try XCTUnwrap(rawBodies(forPath: APIPath.attributionEvent).first)
+        XCTAssertTrue(raw.contains("\"debug\":false"), "got \(raw)")
+    }
+
     // MARK: - 2b. TAS-801 `debug` marker on all three bodies
 
     /// Backwards compatibility, pinned at the source level: both 1.3.0
