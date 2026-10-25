@@ -51,11 +51,50 @@ internal struct HelmHTTPClient: Sendable {
             throw HelmError.encodingFailed(error)
         }
 
-        logger.info("POST \(url.absoluteString, privacy: .public)")
+        return try await send(request, session: config.session)
+    }
+
+    /// POST a `multipart/form-data` body to a Helm API endpoint, authenticated
+    /// with the configured publishable key.
+    ///
+    /// - Parameters:
+    ///   - path: The API path (e.g. "/api/client/v1/feedback/").
+    ///   - form: The form fields and files to send.
+    ///   - timeout: The request timeout in seconds. Uploads that carry an
+    ///     image need longer than the 10 seconds used for JSON requests.
+    /// - Returns: The parsed JSON response as a dictionary.
+    /// - Throws: `HelmError` on configuration, network, or parsing failures.
+    static func postMultipart(path: String, form: MultipartFormData, timeout: TimeInterval = 60) async throws -> [String: Any] {
+        guard let config = Configuration.shared else {
+            throw HelmError.notConfigured
+        }
+
+        guard let url = URL(string: config.baseURL + path) else {
+            throw HelmError.invalidResponse
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = timeout
+        request.setValue("Bearer \(config.publishableKey)", forHTTPHeaderField: "Authorization")
+        // Encode first: `encoded()` may replace the boundary, and the header
+        // must name the boundary the body actually uses.
+        var form = form
+        request.httpBody = form.encoded()
+        request.setValue(form.contentType, forHTTPHeaderField: "Content-Type")
+
+        return try await send(request, session: config.session)
+    }
+
+    /// Send a prepared request and parse the JSON response. Shared by the JSON
+    /// and multipart entry points so both treat responses the same way.
+    private static func send(_ request: URLRequest, session: URLSession) async throws -> [String: Any] {
+        let urlString = request.url?.absoluteString ?? ""
+        logger.info("POST \(urlString, privacy: .public)")
 
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await config.session.data(for: request)
+            (data, response) = try await session.data(for: request)
         } catch {
             logger.error("network error: \(error.localizedDescription, privacy: .public)")
             throw HelmError.networkError(error)
