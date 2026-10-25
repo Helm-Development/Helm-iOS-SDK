@@ -15,6 +15,7 @@ The official Swift SDK for [Helm](https://helmcode.dev). Attribute installs, tra
 - **Offline-tolerant** — promo-code and transaction submissions that can't reach the server are queued on device and replayed automatically for up to 30 days; attribution status is cached per user so paywalls render correctly offline.
 - **Sandbox test data** — `Helm.configure(debug: true)` marks a build's attribution submissions as test data, keeping your own QA redemptions and sandbox purchases out of live influencer payouts. Defaults to `false`, so production builds are safe by default.
 - **Environment label** — `Helm.configure(environment: "staging")` records which deployment the activity came from, so you can filter analytics by environment. Independent of `debug`, and defaults to `"production"`.
+- **User feedback** — `Helm.submitFeedback(...)` sends a bug report, feature request or general feedback from your app's user to Helm, with an optional screenshot. Project members read it on the **User Feedback** page in the Helm portal.
 - **Fire-and-forget API** — event and transaction calls run in the background; calling code never blocks.
 - **Privacy-first** — no IDFA, no ATT prompt, no third-party trackers. Device signals are collected only on first match and never persisted off-device by the SDK.
 - **Zero dependencies** — pure Foundation + `os.log`. No transitive packages.
@@ -36,7 +37,7 @@ The official Swift SDK for [Helm](https://helmcode.dev). Attribute installs, tra
    ```
    https://github.com/Helm-Development/Helm-iOS-SDK.git
    ```
-3. Set the dependency rule to **Up to Next Major Version** starting from `1.5.0`.
+3. Set the dependency rule to **Up to Next Major Version** starting from `1.6.0`.
 4. Add the `Helm` library product to your app target.
 
 ### Swift Package Manager (Package.swift)
@@ -45,7 +46,7 @@ Add Helm to the `dependencies` array of your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Helm-Development/Helm-iOS-SDK.git", from: "1.5.0")
+    .package(url: "https://github.com/Helm-Development/Helm-iOS-SDK.git", from: "1.6.0")
 ]
 ```
 
@@ -279,6 +280,43 @@ Helm.configure(
 - **It is independent of `debug`.** A staging build being used by real testers, rather than by a developer producing throwaway data, is `debug: false, environment: "staging"` — real usage, labelled as coming from staging. A developer's build pointed at production is `debug: true, environment: "production"`. Set each one to answer its own question.
 - **Every event keeps the values it was created with.** An event recorded under one configuration carries that `debug` and `environment` even if the app is reconfigured before the batch is sent — the same rule the offline attribution queue already follows for `debug`.
 
+## User feedback
+
+`Helm.submitFeedback(...)` sends feedback from your app's user to Helm, with an optional image such as a screenshot. Project members read it on the **User Feedback** page (under **Monitoring**) in the Helm portal.
+
+```swift
+do {
+    let result = try await Helm.submitFeedback(
+        type: .bugReport,                 // .bugReport, .featureRequest or .feedback
+        message: "The recipe list is empty after I log in.",
+        image: screenshot,                // a UIImage, or nil
+        userId: currentUser.id,           // optional
+        email: currentUser.email          // optional, so you can reply
+    )
+    print("Stored feedback \(result.id) at \(result.createdAt)")
+} catch HelmFeedbackError.emptyMessage {
+    // Ask the user to write something.
+} catch HelmFeedbackError.network {
+    // Not stored. Let the user try again later.
+} catch {
+    // Any other HelmFeedbackError.
+}
+```
+
+To send image data you already have, use `imageData:` and `imageMimeType:` instead of `image:`:
+
+```swift
+try await Helm.submitFeedback(type: .feedback,
+                              message: "Love the new layout",
+                              imageData: pngData,
+                              imageMimeType: "image/png")
+```
+
+- **What the SDK adds.** Every request carries `platform` (`ios`), the app version (`CFBundleShortVersionString`), the OS version and the device model (the hardware identifier, for example `iPhone16,2`). It also carries the configured `debug` flag: feedback sent from a build configured with `debug: true` is stored as test data and shown with a test-data badge in the portal.
+- **Checks before sending.** The message is trimmed and must be 1 to 5000 characters; otherwise the method throws `.emptyMessage` or `.messageTooLong` without sending anything. Images may be JPEG, PNG, HEIC or WebP, at most 10 MB (10 × 1024 × 1024 bytes).
+- **Large images.** A `UIImage` is encoded as JPEG. If that is over 10 MB, the SDK lowers the JPEG quality and then scales the image down until it fits. Image data passed with `imageData:` is never changed: over 10 MB, the method throws `.imageTooLarge` without sending.
+- **No offline queue.** The method waits for Helm's answer and returns it. If it throws, the feedback was not stored, and your app decides whether to offer a retry. This is different from the attribution methods, which queue submissions while offline.
+
 ## API Reference
 
 ### `Helm`
@@ -317,6 +355,27 @@ public enum Helm {
 
     /// Access attribution tracking features.
     public static var attribution: Attribution { get }
+
+    /// Send user feedback with optional image data (at most 10 MB) to Helm.
+    /// Waits for Helm's answer; nothing is queued.
+    /// - Throws: `HelmFeedbackError`.
+    @discardableResult
+    public static func submitFeedback(type: FeedbackType,
+                                      message: String,
+                                      imageData: Data? = nil,
+                                      imageMimeType: String = "image/jpeg",
+                                      userId: String? = nil,
+                                      email: String? = nil) async throws -> FeedbackResult
+
+    /// Send user feedback with a UIImage. The image is encoded as JPEG and
+    /// compressed, then scaled down, until it is at most 10 MB.
+    /// - Throws: `HelmFeedbackError`.
+    @discardableResult
+    public static func submitFeedback(type: FeedbackType,
+                                      message: String,
+                                      image: UIImage?,
+                                      userId: String? = nil,
+                                      email: String? = nil) async throws -> FeedbackResult
 }
 ```
 
@@ -408,6 +467,49 @@ public enum HelmAttributionError: Error, Equatable, Sendable, LocalizedError {
 }
 ```
 
+### `FeedbackType`
+
+```swift
+public enum FeedbackType: String, CaseIterable, Equatable, Sendable {
+    case bugReport = "bug_report"
+    case featureRequest = "feature_request"
+    case feedback = "feedback"
+}
+```
+
+### `FeedbackResult`
+
+```swift
+public struct FeedbackResult: Equatable, Sendable {
+    public let id: String        // the UUID Helm gave the feedback
+    public let status: String    // "new" for new feedback
+    public let createdAt: Date
+}
+```
+
+### `HelmFeedbackError`
+
+The only error type thrown by `submitFeedback`.
+
+```swift
+public enum HelmFeedbackError: Error, Equatable, Sendable, LocalizedError {
+    // Found on the device; nothing was sent.
+    case notConfigured                              // Helm.configure(...) not called
+    case emptyMessage                               // empty after trimming
+    case messageTooLong(maxLength: Int)             // over 5000 characters
+    case imageTooLarge(maxBytes: Int)               // over 10 MB (also Helm's `image_too_large`)
+    // Helm's answer.
+    case missingField(message: String)              // Helm's `missing_field`
+    case invalidField(message: String)              // Helm's `invalid_field`, e.g. a bad email
+    case invalidImage(message: String)              // Helm's `invalid_image`; also a UIImage that cannot be encoded
+    case authRequired                               // Helm's `auth_required`
+    case invalidToken                               // Helm's `invalid_token`
+    case network                                    // no connection, timeout or 5xx; not stored
+    case server(code: String, message: String)      // any other error Helm returned
+    case invalidResponse                            // 2xx with an unusable body
+}
+```
+
 ## Privacy
 
 The Helm SDK is designed to be privacy-respecting by default:
@@ -442,6 +544,16 @@ Copy these entries into your App Store Connect → App Privacy form:
 
 Both live in Helm's own `UserDefaults` keys, already covered by the SDK manifest's `CA92.1` Required Reason declaration — no Required Reason change is needed in your app. Both are cleared by `Helm.attribution.reset()` and `Helm.analytics.clearIdentity()`.
 
+If your app calls `Helm.submitFeedback(...)` (1.6.0 and later), also declare the data it sends. The SDK's privacy manifest does not list these, because only apps that use feedback collect them:
+
+| Data Category | Data Type | Linked to User | Used for Tracking | Purposes | Declare when |
+|---------------|-----------|----------------|-------------------|----------|--------------|
+| User Content  | Customer Support | Yes if you pass `userId` or `email` | No | App Functionality | always (the feedback message) |
+| User Content  | Photos or Videos | Yes if you pass `userId` or `email` | No | App Functionality | you attach images |
+| Contact Info  | Email Address | Yes | No | App Functionality | you pass `email` |
+
+Feedback also sends the app version, OS version and device model, which the "Other Diagnostic Data" row above already covers. Feedback is not stored on the device; nothing is queued.
+
 ### Account deletion
 
 For App Review Guideline 5.1.1(v) compliance, host apps that offer in-app account deletion should also clear Helm's on-device state when the user deletes their account or logs out into a different account on the same device:
@@ -463,10 +575,10 @@ The SDK emits structured logs via Apple's unified logging system under the subsy
 Helm follows [Semantic Versioning](https://semver.org):
 
 - **Major** (`2.0.0`) — breaking API changes
-- **Minor** (`1.5.0`) — additive, backwards-compatible API
-- **Patch** (`1.5.1`) — backwards-compatible bug fixes
+- **Minor** (`1.6.0`) — additive, backwards-compatible API
+- **Patch** (`1.6.1`) — backwards-compatible bug fixes
 
-The current release is **1.5.0**. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+The current release is **1.6.0**. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ### Tagging convention
 
