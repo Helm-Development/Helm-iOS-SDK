@@ -4,6 +4,33 @@ All notable changes to the Helm iOS SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-10-25
+
+User feedback. Additive and backwards-compatible: no existing API changed.
+
+### Added
+- HELM-310: `Helm.submitFeedback(type:message:imageData:imageMimeType:userId:email:)`
+  sends a bug report, feature request or general feedback from the app's user to
+  Helm's `POST /api/client/v1/feedback/` endpoint (HELM-307) as
+  `multipart/form-data`, with optional JPEG, PNG, HEIC or WebP image data, user ID
+  and email. It returns a `FeedbackResult` with the ID, status and creation date
+  Helm gave the feedback.
+- HELM-310: on iOS, `Helm.submitFeedback(type:message:image:userId:email:)` takes a
+  `UIImage`, encodes it as JPEG and, if the result is over 10 MB, lowers the JPEG
+  quality and then scales the image down until it fits.
+- HELM-310: the SDK adds `platform` (`ios`), the app version, the OS version, the
+  device model (hardware identifier such as `iPhone16,2`) and the configured `debug`
+  flag to every feedback request. Feedback from a `debug: true` build is stored as
+  test data.
+- HELM-310: the message is trimmed and checked (1 to 5000 characters) and image
+  data is checked (at most 10 MB) before anything is sent.
+- HELM-310: new public types `FeedbackType`, `FeedbackResult` and
+  `HelmFeedbackError`. Each error code the endpoint returns (`missing_field`,
+  `invalid_field`, `invalid_image`, `image_too_large`, `auth_required`,
+  `invalid_token`) has its own case; no connection, a timeout or a 5xx is
+  `.network`. There is no offline queue: when the method throws, the feedback was
+  not stored.
+
 ## [1.5.0] - 2026-09-07
 
 The `debug` flag now reaches analytics as well as attribution, and a new
@@ -202,7 +229,9 @@ them are behavioral changes worth reading before you upgrade:
 - `Helm.attribution.increment(_:metadata:)` for fire-and-forget event tracking.
 - Swift Package Manager support for iOS 15+ and macOS 12+.
 
-[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.4.0...HEAD
+[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.6.0...HEAD
+[1.6.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.5.0...1.6.0
+[1.5.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.4.0...1.5.0
 [1.4.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.3.0...1.4.0
 [1.3.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.2.0...1.3.0
 [1.2.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.1.2...1.2.0

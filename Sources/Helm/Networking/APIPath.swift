@@ -5,7 +5,7 @@
 /// and future audits require changing only this file.
 ///
 /// Path prefix notes:
-/// - Attribution endpoints use the `/api/client/v1/` prefix (publishable-key auth).
+/// - Attribution and feedback endpoints use the `/api/client/v1/` prefix (publishable-key auth).
 /// - Analytics endpoints use the `/api/v1/analytics/` prefix (build-entitlement auth).
 /// - Log ingestion uses `/api/v1/logs` (ingest-token auth, preview/non-prod only).
 enum APIPath {
@@ -21,6 +21,12 @@ enum APIPath {
     static let attributionPromoCode   = "/api/client/v1/attribution/promo-code/"
     static let attributionStatus      = "/api/client/v1/attribution/status/"
     static let attributionTransaction = "/api/client/v1/attribution/transaction/"
+
+    // MARK: - Feedback (/api/client/v1/feedback/)
+
+    // HELM-310: user feedback with an optional image (server side: HELM-307).
+    // Sent as multipart/form-data, not JSON.
+    static let feedback = "/api/client/v1/feedback/"
 
     // MARK: - Analytics (/api/v1/analytics/*)
 
