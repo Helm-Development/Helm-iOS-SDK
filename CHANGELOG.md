@@ -22,11 +22,16 @@ iOS 15, where `hasClipboardHandoff()` returns `false`.
   when the app returns to the foreground and on `UIPasteboard.changedNotification`,
   and posts `Notification.Name.helmClipboardHandoffAvailabilityDidChange`
   (`userInfo["available"]`, a `Bool`) when the answer changes.
-- HELM-325: `HelmPasteButton` (SwiftUI, wraps `PasteButton(payloadType: URL.self)`)
-  and `Helm.attribution.makePasteControl(configuration:onResult:)` (UIKit, returns
-  a `UIPasteControl` whose target accepts `UTType.url`). Both report a new
-  `ClipboardHandoffResult` (`.matched`, `.notMatched(reason:)` or `.failed`) on
-  the main actor.
+- HELM-325: `HelmPasteButton` (SwiftUI, wraps
+  `PasteButton(supportedContentTypes: [.url, .plainText])`) and
+  `Helm.attribution.makePasteControl(configuration:onResult:)` (UIKit, returns a
+  `UIPasteControl` whose target accepts `UTType.url` and `UTType.plainText`).
+  Both report a new `ClipboardHandoffResult` (`.matched`, `.notMatched(reason:)`
+  or `.failed`) on the main actor.
+- HELM-325: both Paste buttons accept plain text as well as URLs, because a web
+  page may copy the handoff URL as either type. They share one loader that
+  prefers an item typed as a URL and otherwise trims the text and reads it as a
+  URL; `hasClipboardHandoff()` still decides when the button is shown.
 - HELM-325: a pasted URL is sent only if it is `https` and its path is exactly
   `/h/<code>/` with a code of at least 12 characters from `A-Z a-z 0-9 _ -`.
   Anything else is ignored and reported as `.notMatched(reason: "not_handoff_url")`.

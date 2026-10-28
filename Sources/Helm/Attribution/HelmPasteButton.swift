@@ -17,9 +17,10 @@ import UniformTypeIdentifiers
 /// A SwiftUI Paste button that hands a clipboard handoff code to Helm.
 ///
 /// Show it when `Helm.attribution.hasClipboardHandoff()` returns `true`. The
-/// button is enabled whenever the clipboard holds a URL. When the user taps
-/// it, the SDK checks that the URL is a Helm handoff URL, sends the code to
-/// Helm, and calls `onResult` on the main actor.
+/// button accepts URLs and plain text, and is enabled whenever the clipboard
+/// holds either. When the user taps it, the SDK checks that the pasted value
+/// is a Helm handoff URL, sends the code to Helm, and calls `onResult` on the
+/// main actor.
 ///
 /// Style it with the usual modifiers, for example `.labelStyle(.titleAndIcon)`,
 /// `.buttonBorderShape(.capsule)` and `.tint(.accentColor)`. iOS draws the
@@ -36,11 +37,11 @@ public struct HelmPasteButton: View {
     }
 
     public var body: some View {
-        PasteButton(payloadType: URL.self) { urls in
+        PasteButton(supportedContentTypes: [.url, .plainText]) { itemProviders in
             let attribution = Helm.attribution
-            attribution.handlePastedURL(urls.first,
-                                        changeCountAtPaste: attribution.pasteboardChangeCount,
-                                        onResult: onResult)
+            attribution.handlePaste(itemProviders: itemProviders,
+                                    changeCountAtPaste: attribution.pasteboardChangeCount,
+                                    onResult: onResult)
         }
     }
 }
@@ -51,9 +52,10 @@ extension Attribution {
     /// A UIKit Paste button that hands a clipboard handoff code to Helm.
     ///
     /// Show it when `hasClipboardHandoff()` returns `true`. The control accepts
-    /// URLs (`UTType.url`) and is enabled whenever the clipboard holds one.
-    /// When the user taps it, the SDK checks that the URL is a Helm handoff
-    /// URL, sends the code to Helm, and calls `onResult` on the main actor.
+    /// URLs (`UTType.url`) and plain text (`UTType.plainText`), and is enabled
+    /// whenever the clipboard holds either. When the user taps it, the SDK
+    /// checks that the pasted value is a Helm handoff URL, sends the code to
+    /// Helm, and calls `onResult` on the main actor.
     ///
     /// Add the returned control to your view hierarchy and lay it out like any
     /// other view. Keep it clearly visible: enough contrast and nothing
@@ -80,7 +82,7 @@ extension Attribution {
 }
 
 /// The paste target behind `makePasteControl(configuration:onResult:)`. It
-/// accepts only URLs.
+/// accepts URLs and plain text.
 @available(iOS 16.0, *)
 @MainActor
 internal final class HelmPasteTarget: NSObject, UIPasteConfigurationSupporting {
@@ -88,7 +90,7 @@ internal final class HelmPasteTarget: NSObject, UIPasteConfigurationSupporting {
     nonisolated(unsafe) static var associationKey: UInt8 = 0
 
     var pasteConfiguration: UIPasteConfiguration? =
-        UIPasteConfiguration(acceptableTypeIdentifiers: [UTType.url.identifier])
+        UIPasteConfiguration(acceptableTypeIdentifiers: [UTType.url.identifier, UTType.plainText.identifier])
 
     private let attribution: Attribution
     private let onResult: (@MainActor (ClipboardHandoffResult) -> Void)?
@@ -101,17 +103,9 @@ internal final class HelmPasteTarget: NSObject, UIPasteConfigurationSupporting {
 
     func paste(itemProviders: [NSItemProvider]) {
         // Read the change count now, at the moment of the paste.
-        let changeCount = attribution.pasteboardChangeCount
-        let attribution = self.attribution
-        let onResult = self.onResult
-
-        guard let provider = itemProviders.first(where: { $0.canLoadObject(ofClass: URL.self) }) else {
-            attribution.handlePastedURL(nil, changeCountAtPaste: changeCount, onResult: onResult)
-            return
-        }
-        _ = provider.loadObject(ofClass: URL.self) { url, _ in
-            attribution.handlePastedURL(url, changeCountAtPaste: changeCount, onResult: onResult)
-        }
+        attribution.handlePaste(itemProviders: itemProviders,
+                                changeCountAtPaste: attribution.pasteboardChangeCount,
+                                onResult: onResult)
     }
 }
 #endif

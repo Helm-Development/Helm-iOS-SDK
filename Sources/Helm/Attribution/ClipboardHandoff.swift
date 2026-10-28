@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -79,6 +80,60 @@ internal enum ClipboardHandoffCode {
             return nil
         }
         return String(code)
+    }
+}
+
+// MARK: - Loading pasted items
+
+/// Turns the items from a Paste button into a URL. Shared by
+/// `HelmPasteButton` and `makePasteControl(configuration:onResult:)`.
+///
+/// The Paste buttons accept URLs and plain text, because a web page that
+/// copies a URL may put it on the clipboard as either type. This only turns
+/// the pasted item into a `URL`; `ClipboardHandoffCode.code(from:)` decides
+/// whether it is a handoff URL.
+internal enum PastedItemLoader {
+
+    /// The pasted URL, or `nil` when no item holds one.
+    ///
+    /// Prefers an item that holds a URL (`UTType.url`) and loads as a `URL`.
+    /// Otherwise loads the first item that holds text, trims whitespace and
+    /// line breaks, and reads the rest as a URL.
+    ///
+    /// The URL pass checks the item's type rather than only
+    /// `canLoadObject(ofClass: URL.self)`, because `NSURL` can also load from
+    /// a plain-text item, which would make every text item count as a URL.
+    static func url(from itemProviders: [NSItemProvider]) async -> URL? {
+        for provider in itemProviders
+        where provider.hasItemConformingToTypeIdentifier(UTType.url.identifier)
+            && provider.canLoadObject(ofClass: URL.self) {
+            if let url = await loadURL(from: provider) {
+                return url
+            }
+        }
+        for provider in itemProviders where provider.canLoadObject(ofClass: NSString.self) {
+            if let text = await loadString(from: provider) {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : URL(string: trimmed)
+            }
+        }
+        return nil
+    }
+
+    private static func loadURL(from provider: NSItemProvider) async -> URL? {
+        await withCheckedContinuation { continuation in
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                continuation.resume(returning: url)
+            }
+        }
+    }
+
+    private static func loadString(from provider: NSItemProvider) async -> String? {
+        await withCheckedContinuation { continuation in
+            _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+                continuation.resume(returning: object as? String)
+            }
+        }
     }
 }
 

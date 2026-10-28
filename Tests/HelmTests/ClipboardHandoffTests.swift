@@ -1,3 +1,4 @@
+import UniformTypeIdentifiers
 import XCTest
 @testable import Helm
 
@@ -441,6 +442,76 @@ final class ClipboardHandoffTests: XCTestCase {
         XCTAssertNil(store.exactMethod)
         XCTAssertNil(store.clipboardDismissedChangeCount)
         XCTAssertNil(store.attributionId)
+    }
+
+    // MARK: - Pasted items (URL or plain text)
+
+    /// Item providers built in memory, standing in for what a Paste button
+    /// hands over. They never touch the real clipboard.
+    private static func urlItem(_ string: String) -> NSItemProvider {
+        NSItemProvider(object: URL(string: string)! as NSURL)
+    }
+
+    /// A plain-text item only, like a web page's text copy. Built from data
+    /// rather than `NSItemProvider(object: NSString)`, which on macOS also
+    /// registers `public.url` for text that looks like a URL.
+    private static func textItem(_ string: String) -> NSItemProvider {
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(forTypeIdentifier: UTType.utf8PlainText.identifier,
+                                            visibility: .all) { completion in
+            completion(Data(string.utf8), nil)
+            return nil
+        }
+        return provider
+    }
+
+    func test_loader_reads_a_url_item() async {
+        let url = await PastedItemLoader.url(from: [Self.urlItem(Self.handoffURL.absoluteString)])
+        XCTAssertEqual(url, Self.handoffURL)
+    }
+
+    func test_loader_reads_a_text_item_and_trims_whitespace() async {
+        let url = await PastedItemLoader.url(from: [Self.textItem("  \(Self.handoffURL.absoluteString)\n")])
+        XCTAssertEqual(url, Self.handoffURL)
+    }
+
+    func test_loader_prefers_a_url_item_over_a_text_item() async {
+        let fromURLItem = "https://links.example.com/h/fromTheUrlItem/"
+        let url = await PastedItemLoader.url(from: [
+            Self.textItem("https://links.example.com/h/fromTheTextItem/"),
+            Self.urlItem(fromURLItem),
+        ])
+        XCTAssertEqual(url?.absoluteString, fromURLItem)
+    }
+
+    func test_loader_returns_nil_for_no_items_or_blank_text() async {
+        let none = await PastedItemLoader.url(from: [])
+        XCTAssertNil(none)
+        let blank = await PastedItemLoader.url(from: [Self.textItem("  \n ")])
+        XCTAssertNil(blank)
+    }
+
+    func test_pasted_text_with_a_handoff_url_is_redeemed() async throws {
+        configureSDK { _ in Self.matched("attr-clip") }
+
+        let result = await attribution._handlePaste(itemProviders: [Self.textItem(" \(Self.handoffURL.absoluteString) ")],
+                                                    changeCountAtPaste: pasteboard.changeCount)
+
+        XCTAssertEqual(result, .matched)
+        XCTAssertEqual(store.attributionId, "attr-clip")
+        let request = try XCTUnwrap(requests(forPath: APIPath.attributionClipboard).first)
+        XCTAssertEqual(body(of: request)?["code"] as? String, Self.code)
+    }
+
+    func test_pasted_text_that_is_not_a_handoff_url_sends_nothing() async {
+        configureSDK { _ in Self.matched() }
+
+        for text in ["hello world", "https://example.com/recipes/42/", "\(Self.code)"] {
+            let result = await attribution._handlePaste(itemProviders: [Self.textItem(text)],
+                                                        changeCountAtPaste: pasteboard.changeCount)
+            XCTAssertEqual(result, .notMatched(reason: "not_handoff_url"), text)
+        }
+        XCTAssertTrue(ClipboardMockURLProtocol.receivedRequests.isEmpty)
     }
 
     // MARK: - Polling

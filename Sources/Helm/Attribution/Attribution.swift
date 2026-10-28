@@ -467,24 +467,33 @@ public final class Attribution: @unchecked Sendable {
         pasteboard.changeCount
     }
 
-    /// Called by the Paste button views with the URL the user pasted.
-    /// Redeems it in the background and reports the result on the main actor.
+    /// Called by the Paste button views with the items the user pasted.
+    /// Loads a URL from them and redeems it in the background, then reports
+    /// the result on the main actor.
     ///
     /// - Parameters:
-    ///   - url: The pasted URL, or `nil` when the paste held no URL.
+    ///   - itemProviders: The pasted items (URLs or plain text).
     ///   - changeCountAtPaste: `pasteboardChangeCount` read when the paste
     ///     happened, so the clipboard is cleared only if it still holds the
     ///     pasted code.
     ///   - onResult: The app's completion handler.
-    internal func handlePastedURL(_ url: URL?,
-                                  changeCountAtPaste: Int,
-                                  onResult: (@MainActor (ClipboardHandoffResult) -> Void)?) {
+    internal func handlePaste(itemProviders: [NSItemProvider],
+                              changeCountAtPaste: Int,
+                              onResult: (@MainActor (ClipboardHandoffResult) -> Void)?) {
         Task {
-            let result = await _redeemClipboardHandoff(url, changeCountAtPaste: changeCountAtPaste)
+            let result = await _handlePaste(itemProviders: itemProviders, changeCountAtPaste: changeCountAtPaste)
             if let onResult {
                 await MainActor.run { onResult(result) }
             }
         }
+    }
+
+    /// Async variant of `handlePaste(itemProviders:changeCountAtPaste:onResult:)`.
+    /// Internal so tests can `await` the result.
+    internal func _handlePaste(itemProviders: [NSItemProvider],
+                               changeCountAtPaste: Int) async -> ClipboardHandoffResult {
+        let url = await PastedItemLoader.url(from: itemProviders)
+        return await _redeemClipboardHandoff(url, changeCountAtPaste: changeCountAtPaste)
     }
 
     /// Redeem a pasted clipboard handoff URL with Helm.

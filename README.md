@@ -246,7 +246,7 @@ final class PasteHandoffViewController: UIViewController {
 }
 ```
 
-The control accepts URLs (`UTType.url`) only, and keeps its paste target alive for as long as the control exists.
+Both Paste buttons accept a URL (`UTType.url`) or plain text (`UTType.plainText`), because a web page may put the copied URL on the clipboard as either type. The SDK prefers an item typed as a URL; otherwise it trims the text and reads it as a URL. Either way, only a Helm handoff URL is sent (see below). This does not change when the button appears: `hasClipboardHandoff()` decides that. The UIKit control keeps its paste target alive for as long as the control exists.
 
 > **Keep the Paste button clearly visible.** iOS checks that the button was visibly shown when it was tapped. Give it enough contrast with the background, do not cover it with other views, and do not make it transparent or hide it. If iOS decides it was not visible, the tap does nothing. iOS draws the button's label and icon; you cannot replace them.
 
@@ -560,7 +560,7 @@ public final class Attribution {
 
 ```swift
 /// A SwiftUI Paste button (iOS 16+) that redeems a pasted clipboard handoff
-/// URL. Wraps `PasteButton(payloadType: URL.self)`.
+/// URL. Wraps `PasteButton(supportedContentTypes: [.url, .plainText])`.
 @available(iOS 16.0, *)
 public struct HelmPasteButton: View {
     public init(onResult: (@MainActor (ClipboardHandoffResult) -> Void)? = nil)
