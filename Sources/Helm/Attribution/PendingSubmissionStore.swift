@@ -3,8 +3,8 @@ import os
 
 private let logger = Logger(subsystem: "dev.helmcode.helm", category: "attribution")
 
-/// A promo-code or transaction submission that failed to reach the backend and
-/// is waiting to be replayed.
+/// A promo-code, transaction or clipboard handoff submission that failed to
+/// reach the backend and is waiting to be replayed.
 ///
 /// Value type so entries cross `Task` boundaries cleanly, matching the
 /// `PendingEvent` precedent in `Attribution`.
@@ -13,14 +13,19 @@ internal struct PendingSubmission: Codable, Equatable, Sendable {
     internal enum Kind: String, Codable, Sendable {
         case promoCode = "promo_code"
         case transaction
+        /// HELM-325: a clipboard handoff code pasted through the Paste button.
+        case clipboardHandoff = "clipboard_handoff"
     }
 
     /// Stable identity so a replayed entry can be removed without relying on
     /// array indices (the queue can be mutated concurrently between reads).
     let id: String
     let kind: Kind
+    /// The host app's user ID. Empty for `.clipboardHandoff`, which is tied to
+    /// the installation rather than to a user.
     let userId: String
-    /// The promo code, or the StoreKit original transaction id.
+    /// The promo code, the StoreKit original transaction id, or the clipboard
+    /// handoff code.
     let value: String
     let enqueuedAt: Date
     /// TAS-801: the sandbox marker captured from the configuration **at enqueue

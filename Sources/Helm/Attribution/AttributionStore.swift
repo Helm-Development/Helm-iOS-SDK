@@ -11,6 +11,25 @@ internal final class AttributionStore: @unchecked Sendable {
         // launch can't slam the server forever.
         static let attempts = "helm_attribution_attempts"
         static let lastAttempt = "helm_attribution_last_attempt"
+        // HELM-325: how the stored attribution ID was obtained, when it came
+        // from an exact method (clipboard handoff). Empty or missing means the
+        // ID, if any, came from `match()`.
+        static let method = "helm_attribution_method"
+        // HELM-325: set once a clipboard handoff code has been redeemed for
+        // this installation, whether or not it became the primary attribution.
+        static let clipboardRedeemed = "helm_clipboard_redeemed"
+        // HELM-325: the pasteboard change count at the moment the user pasted
+        // something that did not attribute the install (not a handoff URL, or
+        // a code Helm rejected). While the clipboard still has that change
+        // count, `hasClipboardHandoff()` returns `false` so the app does not
+        // keep offering the same paste.
+        static let clipboardDismissedChangeCount = "helm_clipboard_dismissed_change_count"
+    }
+
+    /// How an exact attribution ID was obtained. The raw value is persisted.
+    enum ExactMethod: String {
+        /// HELM-325: a clipboard handoff code pasted through the Paste button.
+        case clipboard
     }
 
     /// Maximum number of `match()` attempts before the SDK gives up and
@@ -65,6 +84,52 @@ internal final class AttributionStore: @unchecked Sendable {
     /// Store that attribution was checked but no match was found.
     func storeUnmatched() {
         defaults.set("", forKey: Keys.attributionId)
+    }
+
+    // MARK: - Exact attribution (HELM-325)
+
+    /// Store an attribution ID that came from an exact method, replacing any
+    /// earlier unmatched or `match()` result. `match()` never overwrites an
+    /// exact attribution.
+    func storeExactMatch(attributionId: String, method: ExactMethod) {
+        defaults.set(attributionId, forKey: Keys.attributionId)
+        defaults.set(method.rawValue, forKey: Keys.method)
+    }
+
+    /// The exact method behind the stored attribution ID, or `nil` when the
+    /// stored ID (if any) came from `match()`.
+    var exactMethod: ExactMethod? {
+        defaults.string(forKey: Keys.method).flatMap(ExactMethod.init(rawValue:))
+    }
+
+    /// Whether the stored attribution ID came from an exact method.
+    var hasExactAttribution: Bool {
+        exactMethod != nil
+    }
+
+    // MARK: - Clipboard handoff (HELM-325)
+
+    /// Whether a clipboard handoff code has been redeemed for this
+    /// installation.
+    var clipboardRedeemed: Bool {
+        defaults.bool(forKey: Keys.clipboardRedeemed)
+    }
+
+    /// Record that a clipboard handoff code was redeemed.
+    func markClipboardRedeemed() {
+        defaults.set(true, forKey: Keys.clipboardRedeemed)
+    }
+
+    /// The pasteboard change count of the last paste that did not attribute
+    /// the install, or `nil` if there has been none.
+    var clipboardDismissedChangeCount: Int? {
+        defaults.object(forKey: Keys.clipboardDismissedChangeCount) as? Int
+    }
+
+    /// Remember the pasteboard change count of a paste that did not attribute
+    /// the install.
+    func storeClipboardDismissed(changeCount: Int) {
+        defaults.set(changeCount, forKey: Keys.clipboardDismissedChangeCount)
     }
 
     // MARK: - Retry Budget (HELM-184)
@@ -143,6 +208,9 @@ internal final class AttributionStore: @unchecked Sendable {
         defaults.removeObject(forKey: Keys.attributionId)
         defaults.removeObject(forKey: Keys.attempts)
         defaults.removeObject(forKey: Keys.lastAttempt)
+        defaults.removeObject(forKey: Keys.method)
+        defaults.removeObject(forKey: Keys.clipboardRedeemed)
+        defaults.removeObject(forKey: Keys.clipboardDismissedChangeCount)
     }
 
     // MARK: - Device ID (deprecated — HELM-203)

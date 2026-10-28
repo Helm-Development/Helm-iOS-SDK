@@ -22,6 +22,11 @@ enum APIPath {
     static let attributionStatus      = "/api/client/v1/attribution/status/"
     static let attributionTransaction = "/api/client/v1/attribution/transaction/"
 
+    // HELM-325: redeem a clipboard handoff code pasted through the Paste
+    // button (server side: HELM-323). Asserted literally in
+    // `ClipboardHandoffTests`.
+    static let attributionClipboard = "/api/client/v1/attribution/clipboard/"
+
     // MARK: - Feedback (/api/client/v1/feedback/)
 
     // HELM-310: user feedback with an optional image (server side: HELM-307).

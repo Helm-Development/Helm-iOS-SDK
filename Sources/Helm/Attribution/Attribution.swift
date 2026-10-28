@@ -24,16 +24,25 @@ public final class Attribution: @unchecked Sendable {
     /// Injected so tests can supply a fixed hash without touching `.standard`
     /// UserDefaults or `Analytics.shared`.
     private let userHash: () -> String?
+    /// HELM-325: the clipboard, reached only through calls that do not show
+    /// the paste prompt. Injected so tests never touch the real clipboard.
+    private let pasteboard: PasteboardAccess
 
-    // HELM-187: event queue + match-in-flight flag.
+    // HELM-187: event queue + match-in-flight state.
     //
     // The queue stores already-encoded entries (event_type + serialized
     // metadata) so each pending event is `Sendable`-safe. It's bounded at
     // `maxPendingEvents`; the oldest entry drops on overflow so a stuck
     // match can't grow the queue without bound.
+    //
+    // HELM-325: `match()` and a clipboard handoff redeem can both be deciding
+    // the attribution at the same time, so this is a count rather than a flag.
+    // Events stay queued until the count is back to zero, and the queue is
+    // flushed then if any of the finished requests reached a final answer.
     private let queueLock = NSLock()
     private var pendingEvents: [PendingEvent] = []
-    private var matchInFlight: Bool = false
+    private var resolutionsInFlight: Int = 0
+    private var flushWhenIdle: Bool = false
     private static let maxPendingEvents: Int = 100
 
     /// A queued event waiting for `match()` to resolve. Stored as
@@ -58,12 +67,23 @@ public final class Attribution: @unchecked Sendable {
     /// singleton `init()` so test-constructed instances stay observer-free.
     private var observerTokens: [NSObjectProtocol] = []
 
+    // HELM-325: clipboard watching. Starts on the first
+    // `hasClipboardHandoff()` call, and only on the shared instance (or when a
+    // test asks for it), so apps that never use the clipboard handoff never
+    // have the clipboard checked.
+    private let clipboardLock = NSLock()
+    private let watchesClipboard: Bool
+    private var clipboardWatchStarted = false
+    private var lastClipboardAvailability: Bool?
+
     private init() {
         self.store = AttributionStore()
         self.pendingStore = PendingSubmissionStore()
         self.statusCache = AttributionStatusCache()
         self.installationId = { Analytics.shared.installationIdValue }
         self.userHash = { Analytics.shared.currentUserHash }
+        self.pasteboard = DefaultPasteboard.make()
+        self.watchesClipboard = true
         observeForeground()
     }
 
@@ -77,16 +97,24 @@ public final class Attribution: @unchecked Sendable {
     /// attribution status cache. Deliberately does **not** register the
     /// foreground observer — replay triggers are exercised through
     /// `_replayPendingSubmissions()` directly.
+    ///
+    /// HELM-325 adds a `pasteboard` seam. Clipboard watching stays off unless
+    /// `watchesClipboard` is `true`; re-checks are exercised through
+    /// `recheckClipboardHandoff()` directly.
     internal init(store: AttributionStore,
                   pendingStore: PendingSubmissionStore = PendingSubmissionStore(),
                   statusCache: AttributionStatusCache = AttributionStatusCache(),
                   installationId: @escaping () -> String = { Analytics.shared.installationIdValue },
-                  userHash: @escaping () -> String? = { Analytics.shared.currentUserHash }) {
+                  userHash: @escaping () -> String? = { Analytics.shared.currentUserHash },
+                  pasteboard: PasteboardAccess = NoPasteboard(),
+                  watchesClipboard: Bool = false) {
         self.store = store
         self.pendingStore = pendingStore
         self.statusCache = statusCache
         self.installationId = installationId
         self.userHash = userHash
+        self.pasteboard = pasteboard
+        self.watchesClipboard = watchesClipboard
     }
 
     deinit {
@@ -130,6 +158,14 @@ public final class Attribution: @unchecked Sendable {
             return
         }
 
+        // HELM-325: an exact attribution (clipboard handoff) always wins over
+        // `match()`, so there is nothing left for `match()` to decide.
+        guard !store.hasExactAttribution else {
+            logger.info("match() skipped — an exact attribution is already stored")
+            store.markChecked()
+            return
+        }
+
         // HELM-184: respect the bounded retry budget. Once exhausted, mark
         // checked so we stop hitting the server on every launch.
         guard store.canRetry else {
@@ -141,8 +177,10 @@ public final class Attribution: @unchecked Sendable {
         // HELM-187: any increment() calls that arrive between now and the
         // end of this method get queued so they can pick up the resolved
         // attribution_id (or null) instead of posting with no context.
-        setMatchInFlight(true)
-        defer { setMatchInFlight(false) }
+        beginResolution()
+        // Whether this call reached a final answer, so queued events can be
+        // sent. A failure that will be retried leaves them queued.
+        var resolved = false
 
         do {
             let deviceId = installationId()
@@ -164,7 +202,11 @@ public final class Attribution: @unchecked Sendable {
 
             logger.info("match() response: \(response, privacy: .private)")
 
-            if let matched = response["matched"] as? Bool, matched {
+            if store.hasExactAttribution {
+                // HELM-325: a clipboard handoff finished while this request was
+                // in flight. Its result wins whichever finishes last.
+                logger.info("match() result ignored — an exact attribution arrived first")
+            } else if let matched = response["matched"] as? Bool, matched {
                 let attributionId = response["attribution_id"] as? String ?? ""
                 store.storeMatch(attributionId: attributionId)
                 // Forward the token to analytics so the next registration carries
@@ -178,16 +220,18 @@ public final class Attribution: @unchecked Sendable {
 
             store.markChecked()
             store.resetRetryBudget()
-            await flushPendingEvents()
+            resolved = true
         } catch {
             logger.error("Attribution match failed: \(error.localizedDescription, privacy: .public)")
             store.recordFailedAttempt()
             if !store.canRetry {
                 logger.info("match() retry budget exhausted — marking checked")
                 store.markChecked()
-                await flushPendingEvents()
+                resolved = true
             }
         }
+
+        await endResolution(resolved: resolved)
     }
 
     // MARK: - Events
@@ -214,7 +258,7 @@ public final class Attribution: @unchecked Sendable {
         // up the resolved attribution_id (or null) once the match returns.
         // Otherwise fire immediately as before.
         queueLock.lock()
-        if matchInFlight {
+        if resolutionsInFlight > 0 {
             pendingEvents.append(PendingEvent(eventType: eventType, metadataData: metadataData, userHash: nil))
             if pendingEvents.count > Self.maxPendingEvents {
                 // Drop the oldest entry so the queue stays bounded.
@@ -262,7 +306,7 @@ public final class Attribution: @unchecked Sendable {
         let hash = userHash()
 
         queueLock.lock()
-        if matchInFlight {
+        if resolutionsInFlight > 0 {
             pendingEvents.append(PendingEvent(eventType: eventType, metadataData: metadataData, userHash: hash))
             if pendingEvents.count > Self.maxPendingEvents {
                 pendingEvents.removeFirst(pendingEvents.count - Self.maxPendingEvents)
@@ -316,8 +360,9 @@ public final class Attribution: @unchecked Sendable {
     }
 
     /// Drain the pending-event queue, posting each event with the now-resolved
-    /// attribution context. Called from `_match()` once the SDK has a final
-    /// attribution decision (success path or budget-exhausted failure path).
+    /// attribution context. Called through `endResolution(resolved:)` once the
+    /// SDK has a final attribution decision (success path or budget-exhausted
+    /// failure path) and nothing else is still deciding it.
     private func flushPendingEvents() async {
         let drained = drainPendingEvents()
         for entry in drained {
@@ -337,12 +382,302 @@ public final class Attribution: @unchecked Sendable {
         return drained
     }
 
-    /// Set the match-in-flight flag under the lock. Synchronous for the
-    /// same Swift 6 reason as `drainPendingEvents()`.
-    private func setMatchInFlight(_ value: Bool) {
+    /// Record that a request deciding the attribution (`match()` or a
+    /// clipboard handoff redeem) has started. Synchronous for the same Swift 6
+    /// reason as `drainPendingEvents()`.
+    private func beginResolution() {
         queueLock.lock()
         defer { queueLock.unlock() }
-        matchInFlight = value
+        resolutionsInFlight += 1
+    }
+
+    /// Record that a request deciding the attribution has finished, and send
+    /// the queued events once nothing else is still deciding it.
+    ///
+    /// - Parameter resolved: whether this request reached a final answer. A
+    ///   failure that will be retried passes `false`, which leaves the events
+    ///   queued unless another request has already reached a final answer.
+    private func endResolution(resolved: Bool) async {
+        if finishResolution(resolved: resolved) {
+            await flushPendingEvents()
+        }
+    }
+
+    /// The locked half of `endResolution(resolved:)`. Returns `true` when the
+    /// caller should flush the queue now.
+    private func finishResolution(resolved: Bool) -> Bool {
+        queueLock.lock()
+        defer { queueLock.unlock() }
+        resolutionsInFlight = max(0, resolutionsInFlight - 1)
+        if resolved { flushWhenIdle = true }
+        guard resolutionsInFlight == 0, flushWhenIdle else { return false }
+        flushWhenIdle = false
+        return true
+    }
+
+    // MARK: - Clipboard handoff (HELM-325)
+
+    /// Whether the app should show the Paste button (`HelmPasteButton`, or the
+    /// control from `makePasteControl(configuration:onResult:)`) so the user
+    /// can hand over the code Helm's download page copied.
+    ///
+    /// Checks the clipboard without showing the paste prompt or the "pasted
+    /// from" notice: it only asks iOS whether the clipboard probably holds a
+    /// web URL. It never reads the clipboard's contents.
+    ///
+    /// Returns `false`:
+    /// - on iOS 15 and on macOS, which have no Paste button;
+    /// - once a clipboard handoff code has been redeemed for this installation,
+    ///   or while a redeem is waiting to be sent again;
+    /// - when the user already pasted the current clipboard contents and they
+    ///   did not attribute the install.
+    ///
+    /// After the first call, the SDK checks again when the app returns to the
+    /// foreground and when the clipboard changes, and posts
+    /// `Notification.Name.helmClipboardHandoffAvailabilityDidChange` when the
+    /// answer changes.
+    public func hasClipboardHandoff() async -> Bool {
+        startClipboardWatchIfNeeded()
+        let available = await evaluateClipboardHandoff()
+        recordClipboardAvailability(available, notify: false)
+        return available
+    }
+
+    /// The answer to `hasClipboardHandoff()`, without starting the watch or
+    /// recording the result.
+    internal func evaluateClipboardHandoff() async -> Bool {
+        guard #available(iOS 16.0, *) else { return false }
+        if store.clipboardRedeemed { return false }
+        if hasQueuedClipboardHandoff { return false }
+        if let dismissed = store.clipboardDismissedChangeCount,
+           dismissed == pasteboard.changeCount {
+            return false
+        }
+        return await pasteboard.hasProbableWebURL()
+    }
+
+    /// Whether a clipboard handoff code is in the offline queue.
+    private var hasQueuedClipboardHandoff: Bool {
+        pendingStore.all().contains { $0.kind == .clipboardHandoff }
+    }
+
+    /// The clipboard's change count right now. Read by the Paste button views
+    /// at the moment of the paste. Reading it does not prompt.
+    internal var pasteboardChangeCount: Int {
+        pasteboard.changeCount
+    }
+
+    /// Called by the Paste button views with the URL the user pasted.
+    /// Redeems it in the background and reports the result on the main actor.
+    ///
+    /// - Parameters:
+    ///   - url: The pasted URL, or `nil` when the paste held no URL.
+    ///   - changeCountAtPaste: `pasteboardChangeCount` read when the paste
+    ///     happened, so the clipboard is cleared only if it still holds the
+    ///     pasted code.
+    ///   - onResult: The app's completion handler.
+    internal func handlePastedURL(_ url: URL?,
+                                  changeCountAtPaste: Int,
+                                  onResult: (@MainActor (ClipboardHandoffResult) -> Void)?) {
+        Task {
+            let result = await _redeemClipboardHandoff(url, changeCountAtPaste: changeCountAtPaste)
+            if let onResult {
+                await MainActor.run { onResult(result) }
+            }
+        }
+    }
+
+    /// Redeem a pasted clipboard handoff URL with Helm.
+    ///
+    /// - A URL whose path is not `/h/<code>/` is ignored: nothing is sent and
+    ///   the result is `.notMatched(reason: "not_handoff_url")`.
+    /// - `matched: true` marks the code as redeemed. When the response says
+    ///   the attribution is `primary`, its ID replaces any stored attribution
+    ///   ID (including a `match()` result) and is passed to analytics. The
+    ///   clipboard is then cleared if it has not changed since the paste.
+    /// - `matched: false` stores nothing new.
+    /// - A transport failure queues the code for replay.
+    internal func _redeemClipboardHandoff(_ url: URL?, changeCountAtPaste: Int) async -> ClipboardHandoffResult {
+        guard let url, let code = ClipboardHandoffCode.code(from: url) else {
+            logger.info("pasted value is not a clipboard handoff URL — ignored")
+            store.storeClipboardDismissed(changeCount: changeCountAtPaste)
+            await _recheckClipboardHandoff()
+            return .notMatched(reason: "not_handoff_url")
+        }
+
+        guard Configuration.shared != nil else {
+            logger.error("clipboard handoff pasted before Helm.configure(...) — not sent")
+            return .failed
+        }
+
+        await _replayPendingSubmissions()
+
+        // TAS-801: snapshot the marker once so the request body and any queued
+        // entry that follows a transport failure agree on the environment.
+        let debug = currentDebug()
+
+        // Events recorded while the redeem is in flight wait for its answer,
+        // so they carry the clipboard attribution ID when there is one.
+        beginResolution()
+
+        let result: ClipboardHandoffResult
+        do {
+            let response = try await HelmHTTPClient.post(
+                path: APIPath.attributionClipboard,
+                body: clipboardBody(code: code, debug: debug)
+            )
+            result = applyClipboardResponse(response, changeCountAtPaste: changeCountAtPaste)
+        } catch {
+            switch AttributionErrorMapper.classify(error) {
+            case .transport:
+                pendingStore.enqueue(PendingSubmission(kind: .clipboardHandoff,
+                                                       userId: "",
+                                                       value: code,
+                                                       enqueuedAt: Date(),
+                                                       debug: debug))
+                logger.info("clipboard handoff queued for replay — transport failure")
+            case .terminal(let mapped):
+                logger.error("clipboard handoff rejected: \(mapped.localizedDescription, privacy: .public)")
+            }
+            result = .failed
+        }
+
+        // Every outcome is final for the events queued meanwhile: they are
+        // sent with whatever attribution ID is now stored.
+        await endResolution(resolved: true)
+        await _recheckClipboardHandoff()
+        return result
+    }
+
+    /// Apply a `200` response from the clipboard redeem endpoint.
+    ///
+    /// - Parameter changeCountAtPaste: the clipboard change count at the
+    ///   paste, or `nil` for a replayed code, whose paste happened in an
+    ///   earlier launch. The clipboard is never cleared for a replay, because
+    ///   the change count may not mean the same thing after a restart.
+    @discardableResult
+    private func applyClipboardResponse(_ response: [String: Any],
+                                        changeCountAtPaste: Int?) -> ClipboardHandoffResult {
+        guard let matched = response["matched"] as? Bool else {
+            logger.error("clipboard handoff response has no `matched` field")
+            return .failed
+        }
+
+        guard matched else {
+            let reason = response["reason"] as? String ?? "unknown"
+            logger.info("clipboard handoff not matched — reason=\(reason, privacy: .public)")
+            if let changeCountAtPaste {
+                store.storeClipboardDismissed(changeCount: changeCountAtPaste)
+            }
+            return .notMatched(reason: reason)
+        }
+
+        guard let attributionId = response["attribution_id"] as? String, !attributionId.isEmpty else {
+            logger.error("clipboard handoff matched without an attribution_id")
+            return .failed
+        }
+
+        store.markClipboardRedeemed()
+
+        // HELM-335: an installation can have both a clipboard and an Apple Ads
+        // attribution. The server marks the one with the later touch as
+        // primary, and only that one becomes the stored attribution ID. A
+        // response without `primary` comes from a server that predates the
+        // rule, and is treated as primary.
+        let primary = response["primary"] as? Bool ?? true
+        if primary {
+            store.storeExactMatch(attributionId: attributionId, method: .clipboard)
+            Analytics.shared.onAttributionMatched(attributionId)
+            logger.info("clipboard handoff matched — attribution_id=\(attributionId, privacy: .private)")
+        } else {
+            logger.info("clipboard handoff matched but not primary — stored attribution kept")
+        }
+
+        if let changeCountAtPaste, pasteboard.changeCount == changeCountAtPaste {
+            pasteboard.clear()
+        }
+        return .matched
+    }
+
+    private func clipboardBody(code: String, debug: Bool) -> [String: Any] {
+        [
+            "code": code,
+            "device_id": installationId(),
+            "debug": debug,
+        ]
+    }
+
+    /// Start re-checking on foreground and on clipboard changes. Runs once,
+    /// and only on an instance that watches the clipboard (the shared one).
+    private func startClipboardWatchIfNeeded() {
+        #if canImport(UIKit) && os(iOS)
+        guard watchesClipboard else { return }
+        clipboardLock.lock()
+        if clipboardWatchStarted {
+            clipboardLock.unlock()
+            return
+        }
+        clipboardWatchStarted = true
+        clipboardLock.unlock()
+
+        let center = NotificationCenter.default
+        let foreground = center.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.recheckClipboardHandoff()
+        }
+        let changed = center.addObserver(
+            forName: UIPasteboard.changedNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.recheckClipboardHandoff()
+        }
+
+        clipboardLock.lock()
+        observerTokens.append(contentsOf: [foreground, changed])
+        clipboardLock.unlock()
+        #endif
+    }
+
+    /// Fire-and-forget re-check.
+    private func recheckClipboardHandoff() {
+        Task {
+            await _recheckClipboardHandoff()
+        }
+    }
+
+    /// Check the clipboard again and post
+    /// `helmClipboardHandoffAvailabilityDidChange` if the answer changed.
+    /// Does nothing until the app has called `hasClipboardHandoff()`, so the
+    /// clipboard is never checked for apps that do not use the feature.
+    internal func _recheckClipboardHandoff() async {
+        guard clipboardHandoffInUse else { return }
+
+        let available = await evaluateClipboardHandoff()
+        recordClipboardAvailability(available, notify: true)
+    }
+
+    /// Whether the app has called `hasClipboardHandoff()`. Synchronous so the
+    /// lock never spans an `await` (Swift 6).
+    private var clipboardHandoffInUse: Bool {
+        clipboardLock.lock()
+        defer { clipboardLock.unlock() }
+        return lastClipboardAvailability != nil
+    }
+
+    private func recordClipboardAvailability(_ available: Bool, notify: Bool) {
+        clipboardLock.lock()
+        let changed = lastClipboardAvailability != available
+        lastClipboardAvailability = available
+        clipboardLock.unlock()
+
+        guard notify, changed else { return }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .helmClipboardHandoffAvailabilityDidChange,
+                                            object: self,
+                                            userInfo: ["available": available])
+        }
     }
 
     // MARK: - Influencer promo codes (HELM-220)
@@ -552,7 +887,14 @@ public final class Attribution: @unchecked Sendable {
     internal func _replayPendingSubmissions() async {
         guard Configuration.shared != nil else { return }
         guard beginReplay() else { return }
-        defer { endReplay() }
+        var replayedClipboardHandoff = false
+        defer {
+            endReplay()
+            if replayedClipboardHandoff {
+                // The queued code no longer blocks `hasClipboardHandoff()`.
+                recheckClipboardHandoff()
+            }
+        }
 
         // `all()` has already pruned entries past the 30-day retention window,
         // so expired submissions never reach the network.
@@ -570,6 +912,9 @@ public final class Attribution: @unchecked Sendable {
                 body = transactionBody(userId: entry.userId,
                                        originalTransactionId: entry.value,
                                        debug: entry.debug)
+            case .clipboardHandoff:
+                path = APIPath.attributionClipboard
+                body = clipboardBody(code: entry.value, debug: entry.debug)
             }
 
             do {
@@ -585,6 +930,12 @@ public final class Attribution: @unchecked Sendable {
                                                    fetchedAt: Date(),
                                                    debug: entry.debug),
                                       for: entry.userId)
+                }
+                if entry.kind == .clipboardHandoff {
+                    // HELM-325: same handling as a fresh redeem, except that
+                    // the clipboard is not cleared (see the method).
+                    applyClipboardResponse(response, changeCountAtPaste: nil)
+                    replayedClipboardHandoff = true
                 }
                 logger.info("replayed queued \(entry.kind.rawValue, privacy: .public) submission")
             } catch {
@@ -686,7 +1037,7 @@ public final class Attribution: @unchecked Sendable {
     internal var testHook_isMatchInFlight: Bool {
         queueLock.lock()
         defer { queueLock.unlock() }
-        return matchInFlight
+        return resolutionsInFlight > 0
     }
 
     /// Internal accessor for tests that need to observe queue depth.
@@ -722,7 +1073,8 @@ public final class Attribution: @unchecked Sendable {
         // post-reset `match()` starts cleanly.
         queueLock.lock()
         pendingEvents.removeAll()
-        matchInFlight = false
+        resolutionsInFlight = 0
+        flushWhenIdle = false
         queueLock.unlock()
 
         store.clearAll()
