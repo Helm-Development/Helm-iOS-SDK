@@ -41,6 +41,7 @@ final class LoggingTests: XCTestCase {
         }
         Helm.configure(publishableKey: "pk_test",
                        baseURL: "https://example.invalid",
+                       appleAdsAttribution: false,
                        session: session)
     }
 
@@ -232,6 +233,7 @@ final class LoggingTests: XCTestCase {
         let session = URLSession(configuration: config)
         Helm.configure(publishableKey: "pk_test",
                        baseURL: "https://example.invalid",
+                       appleAdsAttribution: false,
                        session: session)
         LoggingMockURLProtocol.responder = { request in
             let response = HTTPURLResponse(url: request.url!,
@@ -257,6 +259,7 @@ final class LoggingTests: XCTestCase {
         let session = URLSession(configuration: config)
         Helm.configure(publishableKey: "pk_test",
                        baseURL: "https://example.invalid",
+                       appleAdsAttribution: false,
                        session: session)
         LoggingMockURLProtocol.responder = { request in
             let response = HTTPURLResponse(url: request.url!,

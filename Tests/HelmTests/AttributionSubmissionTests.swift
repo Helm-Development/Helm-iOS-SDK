@@ -61,6 +61,7 @@ final class AttributionSubmissionTests: XCTestCase {
         Helm.configure(publishableKey: "test-key",
                        baseURL: Self.baseURL,
                        debug: debug,
+                       appleAdsAttribution: false,
                        session: session)
     }
 

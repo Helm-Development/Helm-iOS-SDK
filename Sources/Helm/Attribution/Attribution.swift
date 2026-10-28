@@ -27,6 +27,15 @@ public final class Attribution: @unchecked Sendable {
     /// HELM-325: the clipboard, reached only through calls that do not show
     /// the paste prompt. Injected so tests never touch the real clipboard.
     private let pasteboard: PasteboardAccess
+    /// HELM-336: the AdServices attribution token. Injected so tests never
+    /// call the real framework.
+    private let appleAdsTokenProvider: AppleAdsTokenProviding
+
+    // HELM-336: one Apple Ads check at a time, and none for the rest of this
+    // launch after AdServices fails to make a token.
+    private let appleAdsLock = NSLock()
+    private var appleAdsInFlight = false
+    private var appleAdsStoppedForThisLaunch = false
 
     // HELM-187: event queue + match-in-flight state.
     //
@@ -83,6 +92,13 @@ public final class Attribution: @unchecked Sendable {
         self.installationId = { Analytics.shared.installationIdValue }
         self.userHash = { Analytics.shared.currentUserHash }
         self.pasteboard = DefaultPasteboard.make()
+        // The SDK ships for iOS; the macOS build exists so `swift test` can
+        // run. Only iOS asks AdServices, so test runs on a Mac never do.
+        #if os(iOS)
+        self.appleAdsTokenProvider = SystemAppleAdsTokenProvider()
+        #else
+        self.appleAdsTokenProvider = UnavailableAppleAdsTokenProvider()
+        #endif
         self.watchesClipboard = true
         observeForeground()
     }
@@ -101,13 +117,17 @@ public final class Attribution: @unchecked Sendable {
     /// HELM-325 adds a `pasteboard` seam. Clipboard watching stays off unless
     /// `watchesClipboard` is `true`; re-checks are exercised through
     /// `recheckClipboardHandoff()` directly.
+    ///
+    /// HELM-336 adds an `appleAdsTokenProvider` seam. The default reports
+    /// that AdServices is unavailable, so test instances never call it.
     internal init(store: AttributionStore,
                   pendingStore: PendingSubmissionStore = PendingSubmissionStore(),
                   statusCache: AttributionStatusCache = AttributionStatusCache(),
                   installationId: @escaping () -> String = { Analytics.shared.installationIdValue },
                   userHash: @escaping () -> String? = { Analytics.shared.currentUserHash },
                   pasteboard: PasteboardAccess = NoPasteboard(),
-                  watchesClipboard: Bool = false) {
+                  watchesClipboard: Bool = false,
+                  appleAdsTokenProvider: AppleAdsTokenProviding = UnavailableAppleAdsTokenProvider()) {
         self.store = store
         self.pendingStore = pendingStore
         self.statusCache = statusCache
@@ -115,6 +135,7 @@ public final class Attribution: @unchecked Sendable {
         self.userHash = userHash
         self.pasteboard = pasteboard
         self.watchesClipboard = watchesClipboard
+        self.appleAdsTokenProvider = appleAdsTokenProvider
     }
 
     deinit {
@@ -124,6 +145,8 @@ public final class Attribution: @unchecked Sendable {
     /// Replay the offline submission queue whenever the app returns to the
     /// foreground — the moment connectivity is most likely to have returned.
     /// Mirrors `Analytics.observeLifecycle()`.
+    ///
+    /// HELM-336: also retry an unfinished Apple Ads check.
     private func observeForeground() {
         #if canImport(UIKit) && os(iOS)
         let token = NotificationCenter.default.addObserver(
@@ -131,6 +154,7 @@ public final class Attribution: @unchecked Sendable {
             object: nil, queue: .main
         ) { [weak self] _ in
             self?.replayPendingSubmissions()
+            self?.startAppleAdsCheck()
         }
         observerTokens.append(token)
         #endif
@@ -158,8 +182,9 @@ public final class Attribution: @unchecked Sendable {
             return
         }
 
-        // HELM-325: an exact attribution (clipboard handoff) always wins over
-        // `match()`, so there is nothing left for `match()` to decide.
+        // HELM-325 / HELM-336: an exact attribution (clipboard handoff or
+        // Apple Ads) always wins over `match()`, so there is nothing left for
+        // `match()` to decide.
         guard !store.hasExactAttribution else {
             logger.info("match() skipped — an exact attribution is already stored")
             store.markChecked()
@@ -203,8 +228,9 @@ public final class Attribution: @unchecked Sendable {
             logger.info("match() response: \(response, privacy: .private)")
 
             if store.hasExactAttribution {
-                // HELM-325: a clipboard handoff finished while this request was
-                // in flight. Its result wins whichever finishes last.
+                // HELM-325 / HELM-336: a clipboard handoff or Apple Ads match
+                // finished while this request was in flight. It wins whichever
+                // finishes last.
                 logger.info("match() result ignored — an exact attribution arrived first")
             } else if let matched = response["matched"] as? Bool, matched {
                 let attributionId = response["attribution_id"] as? String ?? ""
@@ -689,6 +715,155 @@ public final class Attribution: @unchecked Sendable {
         }
     }
 
+    // MARK: - Apple Ads (HELM-336)
+
+    /// Start the Apple Ads check in the background. Called from
+    /// `Helm.configure(...)` and when the app returns to the foreground. Does
+    /// nothing when `appleAdsAttribution` is off or the check has finished.
+    internal func startAppleAdsCheck() {
+        guard Configuration.shared?.appleAdsAttribution == true,
+              !store.appleAdsFinished else { return }
+        // Off the main thread: `AAAttribution.attributionToken()` can block.
+        Task.detached(priority: .utility) { [self] in
+            await _checkAppleAdsAttribution()
+        }
+    }
+
+    /// Check once per installation whether the install came from Apple Ads.
+    ///
+    /// - Gets a new AdServices token. If AdServices throws, stops for this
+    ///   launch and tries again on the next one. If AdServices is not
+    ///   available, the check is finished.
+    /// - Sends `POST attribution/apple-ads/` with `token`, `device_id` and
+    ///   `debug`.
+    /// - `matched: true` finishes the check. When the response says the
+    ///   attribution is `primary`, its ID replaces the stored attribution ID
+    ///   and is passed to analytics.
+    /// - `not_apple_ads`, `invalid_token` or any other final reason finishes
+    ///   the check and stores nothing.
+    /// - `pending`, a failed request or an unusable response counts as one
+    ///   attempt. The next launch or return to the foreground tries again
+    ///   with a new token, up to `AttributionStore.maxAppleAdsAttempts`
+    ///   attempts within 24 hours of the first try. Then the check is
+    ///   finished.
+    internal func _checkAppleAdsAttribution() async {
+        guard Configuration.shared?.appleAdsAttribution == true else { return }
+        guard !store.appleAdsFinished else { return }
+        guard beginAppleAdsCheck() else { return }
+        defer { endAppleAdsCheck() }
+
+        let now = Date()
+        store.stampAppleAdsFirstAttemptIfNeeded(now)
+        if store.appleAdsRetriesExhausted(now: now) {
+            logger.info("Apple Ads check finished — retries used up")
+            store.markAppleAdsFinished()
+            return
+        }
+
+        let token: String?
+        do {
+            token = try appleAdsTokenProvider.attributionToken()
+        } catch {
+            logger.info("Apple Ads token unavailable — trying again next launch: \(error.localizedDescription, privacy: .public)")
+            stopAppleAdsForThisLaunch()
+            return
+        }
+        guard let token, !token.isEmpty else {
+            logger.info("Apple Ads check finished — AdServices is not available")
+            store.markAppleAdsFinished()
+            return
+        }
+
+        do {
+            let response = try await HelmHTTPClient.post(
+                path: APIPath.attributionAppleAds,
+                body: appleAdsBody(token: token, debug: currentDebug())
+            )
+            applyAppleAdsResponse(response)
+        } catch {
+            logger.error("Apple Ads request failed: \(error.localizedDescription, privacy: .public)")
+            recordAppleAdsRetry()
+        }
+    }
+
+    private func applyAppleAdsResponse(_ response: [String: Any]) {
+        guard let matched = response["matched"] as? Bool else {
+            logger.error("Apple Ads response has no `matched` field")
+            recordAppleAdsRetry()
+            return
+        }
+
+        if matched {
+            guard let attributionId = response["attribution_id"] as? String, !attributionId.isEmpty else {
+                logger.error("Apple Ads matched without an attribution_id")
+                recordAppleAdsRetry()
+                return
+            }
+            // HELM-335: when the installation also has a clipboard
+            // attribution, the later touch is primary. Only the primary one
+            // becomes the stored attribution ID. A response without `primary`
+            // is treated as primary.
+            if response["primary"] as? Bool ?? true {
+                store.storeExactMatch(attributionId: attributionId, method: .appleAds)
+                Analytics.shared.onAttributionMatched(attributionId)
+                logger.info("Apple Ads matched — attribution_id=\(attributionId, privacy: .private)")
+            } else {
+                logger.info("Apple Ads matched but not primary — stored attribution kept")
+            }
+            store.markAppleAdsFinished()
+            return
+        }
+
+        let reason = response["reason"] as? String ?? ""
+        if reason == "pending" {
+            logger.info("Apple Ads record not ready — trying again later")
+            recordAppleAdsRetry()
+        } else {
+            logger.info("Apple Ads check finished — reason=\(reason, privacy: .public)")
+            store.markAppleAdsFinished()
+        }
+    }
+
+    /// Count an attempt without a final answer, and finish the check once the
+    /// attempts or the 24-hour window are used up.
+    private func recordAppleAdsRetry() {
+        store.recordAppleAdsAttempt()
+        if store.appleAdsRetriesExhausted() {
+            logger.info("Apple Ads check finished — retries used up")
+            store.markAppleAdsFinished()
+        }
+    }
+
+    private func appleAdsBody(token: String, debug: Bool) -> [String: Any] {
+        [
+            "token": token,
+            "device_id": installationId(),
+            "debug": debug,
+        ]
+    }
+
+    /// Claim the Apple Ads slot. Synchronous so the lock never spans an
+    /// `await` (Swift 6).
+    private func beginAppleAdsCheck() -> Bool {
+        appleAdsLock.lock()
+        defer { appleAdsLock.unlock() }
+        if appleAdsInFlight || appleAdsStoppedForThisLaunch { return false }
+        appleAdsInFlight = true
+        return true
+    }
+
+    private func endAppleAdsCheck() {
+        appleAdsLock.lock()
+        defer { appleAdsLock.unlock() }
+        appleAdsInFlight = false
+    }
+
+    private func stopAppleAdsForThisLaunch() {
+        appleAdsLock.lock()
+        defer { appleAdsLock.unlock() }
+        appleAdsStoppedForThisLaunch = true
+    }
+
     // MARK: - Influencer promo codes (HELM-220)
 
     /// Submit an influencer promo code for the given user.
@@ -1073,6 +1248,10 @@ public final class Attribution: @unchecked Sendable {
     /// HELM-220: also drops the offline promo-code / transaction submission
     /// queue and the per-user attribution status cache, so no identifier
     /// supplied by the previous user survives on-device.
+    ///
+    /// HELM-325 / HELM-336: also clears the clipboard handoff state and the
+    /// Apple Ads check state, so the Apple Ads check runs again on the next
+    /// launch.
     ///
     /// Call this when the host app logs the user out and a different user
     /// logs in on the same device, or when an account-deletion flow needs

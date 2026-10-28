@@ -27,6 +27,11 @@ enum APIPath {
     // `ClipboardHandoffTests`.
     static let attributionClipboard = "/api/client/v1/attribution/clipboard/"
 
+    // HELM-336: send the AdServices attribution token so Helm can ask Apple
+    // whether the install came from Apple Ads (server side: HELM-335).
+    // Asserted literally in `AppleAdsAttributionTests`.
+    static let attributionAppleAds = "/api/client/v1/attribution/apple-ads/"
+
     // MARK: - Feedback (/api/client/v1/feedback/)
 
     // HELM-310: user feedback with an optional image (server side: HELM-307).

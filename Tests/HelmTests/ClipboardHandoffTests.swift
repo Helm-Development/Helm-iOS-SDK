@@ -62,6 +62,7 @@ final class ClipboardHandoffTests: XCTestCase {
         Helm.configure(publishableKey: "test-key",
                        baseURL: Self.baseURL,
                        debug: debug,
+                       appleAdsAttribution: false,
                        session: URLSession(configuration: config))
     }
 

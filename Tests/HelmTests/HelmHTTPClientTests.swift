@@ -87,6 +87,7 @@ final class HelmHTTPClientTests: XCTestCase {
         Helm.configure(
             publishableKey: "test-key",
             baseURL: "https://helmcode.dev",
+            appleAdsAttribution: false,
             session: session
         )
 
@@ -129,6 +130,7 @@ final class HelmHTTPClientTests: XCTestCase {
         Helm.configure(
             publishableKey: "test-key",
             baseURL: "https://example.invalid",
+            appleAdsAttribution: false,
             session: session
         )
 

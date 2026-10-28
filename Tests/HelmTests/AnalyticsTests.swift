@@ -50,6 +50,7 @@ final class AnalyticsTests: XCTestCase {
                        baseURL: "https://example.invalid",
                        debug: debug,
                        environment: environment,
+                       appleAdsAttribution: false,
                        session: session)
     }
 

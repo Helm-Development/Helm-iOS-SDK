@@ -42,6 +42,11 @@ internal final class Configuration: @unchecked Sendable {
     /// usage at all. Defaults to "production".
     let environment: String
 
+    /// HELM-336: when `true` (the default), the SDK checks once per
+    /// installation whether it came from an Apple Ads campaign, by sending the
+    /// AdServices attribution token to Helm.
+    let appleAdsAttribution: Bool
+
     /// The URLSession used for all network requests. Injectable for testing.
     let session: URLSession
 
@@ -49,11 +54,13 @@ internal final class Configuration: @unchecked Sendable {
          baseURL: String,
          debug: Bool = false,
          environment: String = "production",
+         appleAdsAttribution: Bool = true,
          session: URLSession = .shared) {
         self.publishableKey = publishableKey
         self.baseURL = baseURL
         self.debug = debug
         self.environment = environment
+        self.appleAdsAttribution = appleAdsAttribution
         self.session = session
     }
 }

@@ -137,6 +137,7 @@ final class AnalyticsClientTests: XCTestCase {
                        baseURL: "https://example.invalid",
                        debug: false,
                        environment: "production",
+                       appleAdsAttribution: false,
                        session: URLSession(configuration: .ephemeral))
 
         let payload = event.payload()

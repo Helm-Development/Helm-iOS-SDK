@@ -28,6 +28,11 @@ public enum Helm {
     ///     activity counts as real usage at all: a staging build can still be
     ///     real usage, and a debug build can still be pointed at production.
     ///     Defaults to "production".
+    ///   - appleAdsAttribution: `true` (the default) makes the SDK check once
+    ///     per installation, automatically after `configure`, whether the
+    ///     install came from an Apple Ads campaign. It sends Apple's AdServices
+    ///     attribution token to Helm. This is not tracking under App Tracking
+    ///     Transparency and needs no prompt. Pass `false` to turn it off.
     ///   - session: The `URLSession` used for all network requests. Defaults to
     ///     `.shared`. Inject a custom session for testing or to provide custom
     ///     `URLSessionConfiguration` (timeouts, headers, etc.).
@@ -36,6 +41,7 @@ public enum Helm {
         baseURL: String,
         debug: Bool = false,
         environment: String = "production",
+        appleAdsAttribution: Bool = true,
         session: URLSession = .shared
     ) {
         if Configuration.shared != nil {
@@ -46,6 +52,7 @@ public enum Helm {
             baseURL: baseURL,
             debug: debug,
             environment: environment,
+            appleAdsAttribution: appleAdsAttribution,
             session: session
         )
 
@@ -53,6 +60,10 @@ public enum Helm {
         // makes it the natural moment to drain any attribution submissions that
         // failed while the device was offline. No-op when the queue is empty.
         Attribution.shared.replayPendingSubmissions()
+
+        // HELM-336: check for an Apple Ads install. Does nothing once the
+        // check has finished for this installation, or when turned off.
+        Attribution.shared.startAppleAdsCheck()
     }
 
     /// Whether `Helm.configure(...)` has been called and the SDK is ready to

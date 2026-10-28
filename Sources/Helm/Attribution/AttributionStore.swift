@@ -12,8 +12,8 @@ internal final class AttributionStore: @unchecked Sendable {
         static let attempts = "helm_attribution_attempts"
         static let lastAttempt = "helm_attribution_last_attempt"
         // HELM-325: how the stored attribution ID was obtained, when it came
-        // from an exact method (clipboard handoff). Empty or missing means the
-        // ID, if any, came from `match()`.
+        // from an exact method (clipboard handoff or, from HELM-336, Apple
+        // Ads). Empty or missing means the ID, if any, came from `match()`.
         static let method = "helm_attribution_method"
         // HELM-325: set once a clipboard handoff code has been redeemed for
         // this installation, whether or not it became the primary attribution.
@@ -24,13 +24,28 @@ internal final class AttributionStore: @unchecked Sendable {
         // count, `hasClipboardHandoff()` returns `false` so the app does not
         // keep offering the same paste.
         static let clipboardDismissedChangeCount = "helm_clipboard_dismissed_change_count"
+        // HELM-336: the Apple Ads check. `finished` stops it for good; the
+        // attempt count and first-attempt time bound the retries.
+        static let appleAdsFinished = "helm_apple_ads_finished"
+        static let appleAdsAttempts = "helm_apple_ads_attempts"
+        static let appleAdsFirstAttempt = "helm_apple_ads_first_attempt"
     }
 
     /// How an exact attribution ID was obtained. The raw value is persisted.
     enum ExactMethod: String {
         /// HELM-325: a clipboard handoff code pasted through the Paste button.
         case clipboard
+        /// HELM-336: an Apple Ads install, from the AdServices token.
+        case appleAds = "apple_ads"
     }
+
+    /// HELM-336: the most times the Apple Ads check sends a token without a
+    /// final answer: the first try plus 3 more. Exposed for tests.
+    static let maxAppleAdsAttempts: Int = 4
+
+    /// HELM-336: how long after the first try the Apple Ads check keeps
+    /// retrying. Matches the token's 24-hour lifetime. Exposed for tests.
+    static let appleAdsRetryWindow: TimeInterval = 24 * 60 * 60
 
     /// Maximum number of `match()` attempts before the SDK gives up and
     /// flips `hasChecked` to true. Exposed for tests.
@@ -132,6 +147,53 @@ internal final class AttributionStore: @unchecked Sendable {
         defaults.set(changeCount, forKey: Keys.clipboardDismissedChangeCount)
     }
 
+    // MARK: - Apple Ads check (HELM-336)
+
+    /// Whether the Apple Ads check has finished for this installation. Once
+    /// it has, it never runs again.
+    var appleAdsFinished: Bool {
+        defaults.bool(forKey: Keys.appleAdsFinished)
+    }
+
+    /// Record that the Apple Ads check has finished.
+    func markAppleAdsFinished() {
+        defaults.set(true, forKey: Keys.appleAdsFinished)
+    }
+
+    /// The number of Apple Ads attempts that ended without a final answer
+    /// (`pending` or a failed request).
+    var appleAdsAttemptCount: Int {
+        defaults.integer(forKey: Keys.appleAdsAttempts)
+    }
+
+    /// Count one Apple Ads attempt that ended without a final answer.
+    func recordAppleAdsAttempt() {
+        defaults.set(appleAdsAttemptCount + 1, forKey: Keys.appleAdsAttempts)
+    }
+
+    /// When the Apple Ads check first ran, or `nil` before it has.
+    var appleAdsFirstAttempt: Date? {
+        let seconds = defaults.double(forKey: Keys.appleAdsFirstAttempt)
+        return seconds > 0 ? Date(timeIntervalSince1970: seconds) : nil
+    }
+
+    /// Record when the Apple Ads check first ran. Later calls do nothing.
+    func stampAppleAdsFirstAttemptIfNeeded(_ date: Date) {
+        guard appleAdsFirstAttempt == nil else { return }
+        defaults.set(date.timeIntervalSince1970, forKey: Keys.appleAdsFirstAttempt)
+    }
+
+    /// Whether the Apple Ads check has used its attempts or its 24-hour
+    /// window, measured from the first try.
+    func appleAdsRetriesExhausted(now: Date = Date()) -> Bool {
+        if appleAdsAttemptCount >= Self.maxAppleAdsAttempts { return true }
+        if let first = appleAdsFirstAttempt,
+           now.timeIntervalSince(first) >= Self.appleAdsRetryWindow {
+            return true
+        }
+        return false
+    }
+
     // MARK: - Retry Budget (HELM-184)
 
     /// Serializes attempt-counter writes so concurrent `_match()` failures
@@ -211,6 +273,9 @@ internal final class AttributionStore: @unchecked Sendable {
         defaults.removeObject(forKey: Keys.method)
         defaults.removeObject(forKey: Keys.clipboardRedeemed)
         defaults.removeObject(forKey: Keys.clipboardDismissedChangeCount)
+        defaults.removeObject(forKey: Keys.appleAdsFinished)
+        defaults.removeObject(forKey: Keys.appleAdsAttempts)
+        defaults.removeObject(forKey: Keys.appleAdsFirstAttempt)
     }
 
     // MARK: - Device ID (deprecated — HELM-203)
