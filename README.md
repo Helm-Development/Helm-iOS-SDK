@@ -11,6 +11,7 @@ The official Swift SDK for [Helm](https://helmcode.dev). Attribute installs, tra
 
 - **Attribution matching** — match each install to the campaign, channel, or tracking link that drove it, using device-side signals (no IDFA required).
 - **Clipboard handoff** (iOS 16+) — attribute a new install to the exact tracking link tap or landing page tap that led to it. Helm's download page copies a code, and Apple's Paste button hands it to the SDK in your app with no system paste prompt.
+- **Apple Ads attribution** — installs from Apple Ads campaigns are attributed to the campaign, ad group and keyword automatically after `configure`, using Apple's AdServices token. No extra code and no App Tracking Transparency prompt.
 - **Event tracking** — record conversion events (`signup`, `purchase`, etc.) with optional metadata, automatically linked to the matched attribution source.
 - **Influencer promo codes** — link a user to an influencer's code, read back the paywall offering to present, and report the purchase's original transaction id for revenue attribution.
 - **Offline-tolerant** — promo-code and transaction submissions that can't reach the server are queued on device and replayed automatically for up to 30 days; attribution status is cached per user so paywalls render correctly offline.
@@ -38,7 +39,7 @@ The official Swift SDK for [Helm](https://helmcode.dev). Attribute installs, tra
    ```
    https://github.com/Helm-Development/Helm-iOS-SDK.git
    ```
-3. Set the dependency rule to **Up to Next Major Version** starting from `1.7.0`.
+3. Set the dependency rule to **Up to Next Major Version** starting from `1.8.0`.
 4. Add the `Helm` library product to your app target.
 
 ### Swift Package Manager (Package.swift)
@@ -47,7 +48,7 @@ Add Helm to the `dependencies` array of your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Helm-Development/Helm-iOS-SDK.git", from: "1.7.0")
+    .package(url: "https://github.com/Helm-Development/Helm-iOS-SDK.git", from: "1.8.0")
 ]
 ```
 
@@ -273,6 +274,26 @@ None of these is an error to show the user. Move on to the next screen in every 
 
 `Helm.attribution.reset()` clears the clipboard handoff state along with the rest of the attribution state.
 
+## Apple Ads attribution
+
+If you run Apple Ads campaigns, Helm attributes each install that came from one to the campaign, ad group and keyword. It needs no code beyond `Helm.configure(...)` and shows no prompt.
+
+```swift
+Helm.configure(
+    publishableKey: "pk_live_your_publishable_key",
+    baseURL: "https://helmcode.dev",
+    appleAdsAttribution: true   // the default; pass false to turn it off
+)
+```
+
+- **When it runs.** Once per installation, in the background, right after `configure`. It asks Apple's AdServices framework for an attribution token (`AAAttribution.attributionToken()`, off the main thread) and sends it to Helm with `POST /api/client/v1/attribution/apple-ads/` (`token`, `device_id` and `debug`). Helm asks Apple whether the install came from Apple Ads and records the campaign details.
+- **When it stops.** A match finishes the check. So does an answer that the install did not come from Apple Ads (`not_apple_ads`) or that the token was invalid (`invalid_token`).
+- **Retries.** If Apple's record is not ready yet (`pending`) or the request fails, the SDK tries again with a **new** token on the next launch or when the app returns to the foreground: up to 3 more times, within 24 hours of the first try. If AdServices cannot make a token, the SDK tries again on the next launch.
+- **Which attribution wins.** An installation can have both an Apple Ads attribution and a clipboard handoff attribution. Helm makes the one with the later touch **primary**, and the SDK switches its stored attribution ID only to a primary one. Either one replaces a `match()` result.
+- **Testing.** On a device in developer mode, AdServices returns Apple's test payload, so the first launch creates a test Apple Ads attribution in Helm.
+
+**No ATT prompt.** Apple states that "AdServices does not engage in tracking as defined under the App Tracking Transparency framework" ([Apple Ads: Measuring performance of ads on the App Store](https://ads.apple.com/app-store/help/attribution/0028-measuring-ad-performance)). Requesting and sending the token needs no `NSUserTrackingUsageDescription` and no ATT permission, and the AdServices domain does not belong in `NSPrivacyTrackingDomains`.
+
 ## Influencer attribution
 
 Helm can link a signed-in user to an influencer's promo code, tell you which paywall offering to present to them, and attribute the resulting purchase back to that influencer.
@@ -457,6 +478,9 @@ public enum Helm {
     ///     talks to, e.g. "production", "staging", "development". Recorded
     ///     on analytics activity so it can be filtered by environment.
     ///     Independent of `debug`; defaults to "production".
+    ///   - appleAdsAttribution: `true` (the default) checks once per
+    ///     installation, automatically, whether the install came from an
+    ///     Apple Ads campaign. Needs no ATT prompt. Pass `false` to turn it off.
     ///   - session: The `URLSession` used for all network requests.
     ///     Defaults to `.shared`. Inject a custom session for testing
     ///     or to provide a custom `URLSessionConfiguration`.
@@ -465,6 +489,7 @@ public enum Helm {
         baseURL: String,
         debug: Bool = false,
         environment: String = "production",
+        appleAdsAttribution: Bool = true,
         session: URLSession = .shared
     )
 
@@ -669,7 +694,7 @@ public enum HelmFeedbackError: Error, Equatable, Sendable, LocalizedError {
 
 The Helm SDK is designed to be privacy-respecting by default:
 
-- **No IDFA / ATT prompt** — Helm does not access the IDFA and does not require an `NSUserTrackingUsageDescription` entry in your `Info.plist`. (This applies only to Helm's own data collection — host apps that integrate other ATT-triggering SDKs are unaffected by anything Helm does.)
+- **No IDFA / ATT prompt** — Helm does not access the IDFA and does not require an `NSUserTrackingUsageDescription` entry in your `Info.plist`. The Apple Ads attribution token is not tracking under App Tracking Transparency and needs no prompt (see [Apple Ads attribution](#apple-ads-attribution)). (This applies only to Helm's own data collection — host apps that integrate other ATT-triggering SDKs are unaffected by anything Helm does.)
 - **No third-party trackers** — all requests go directly to your configured Helm backend. Helm's backend treats each customer tenant as a first-party silo; cross-tenant correlation would change this analysis.
 - **No persistent device fingerprint** — device signals (screen size, locale, timezone, OS version) are collected only during the first attribution match and are not stored on-device after the request completes.
 - **Server-derived IP** — your client never reads or transmits its own IP address; the Helm backend reads it from the request envelope.
@@ -679,7 +704,7 @@ The Helm SDK is designed to be privacy-respecting by default:
 
 Helm ships its own `PrivacyInfo.xcprivacy` inside the SDK bundle. The manifest declares Helm's Required Reason API usage (`UserDefaults`, reason `CA92.1` — read/write app state owned by the SDK) and the data categories Helm itself collects. Because the SDK carries this manifest, you do **not** need to add Helm-specific Required Reason API entries to your app's own privacy manifest — Xcode picks Helm's up automatically.
 
-The clipboard handoff adds no Required Reason entry: `UIPasteboard` and its pattern detection are not on Apple's [Required Reason API list](https://developer.apple.com/documentation/bundleresources/app-privacy-configuration/nsprivacyaccessedapitypes/nsprivacyaccessedapitype), which covers only file timestamps, system boot time, disk space, active keyboards and `UserDefaults` (checked October 2026).
+The clipboard handoff and Apple Ads attribution add no Required Reason entry: `UIPasteboard` (including its pattern detection) and AdServices (`AAAttribution`) are not on Apple's [Required Reason API list](https://developer.apple.com/documentation/bundleresources/app-privacy-configuration/nsprivacyaccessedapitypes/nsprivacyaccessedapitype), which covers only file timestamps, system boot time, disk space, active keyboards and `UserDefaults` (checked October 2026).
 
 You still need to declare the data Helm collects in your **App Privacy** nutrition label in App Store Connect — the manifest covers Apple's static API audit; the nutrition label is what the user sees on the product page.
 
@@ -733,10 +758,10 @@ The SDK emits structured logs via Apple's unified logging system under the subsy
 Helm follows [Semantic Versioning](https://semver.org):
 
 - **Major** (`2.0.0`) — breaking API changes
-- **Minor** (`1.7.0`) — additive, backwards-compatible API
-- **Patch** (`1.7.1`) — backwards-compatible bug fixes
+- **Minor** (`1.8.0`) — additive, backwards-compatible API
+- **Patch** (`1.8.1`) — backwards-compatible bug fixes
 
-The current release is **1.7.0**. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+The current release is **1.8.0**. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ### Tagging convention
 

@@ -4,6 +4,38 @@ All notable changes to the Helm iOS SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-10-27
+
+Apple Ads attribution. Additive and backwards-compatible: `appleAdsAttribution` is
+a defaulted parameter, so every existing `Helm.configure(...)` call site keeps
+compiling unchanged. The check is on by default.
+
+### Added
+- HELM-336: `appleAdsAttribution` parameter on
+  `Helm.configure(publishableKey:baseURL:debug:environment:appleAdsAttribution:session:)`,
+  default `true`. When on, the SDK checks once per installation, in the background
+  after `configure`, whether the install came from an Apple Ads campaign. Apps need
+  no other code. It needs no App Tracking Transparency prompt: Apple states that
+  AdServices does not engage in tracking as defined under ATT.
+- HELM-336: the check gets a new token from `AAAttribution.attributionToken()`
+  (AdServices, iOS 14.3+; behind `#if canImport(AdServices)`), off the main thread,
+  and sends `POST /api/client/v1/attribution/apple-ads/` (HELM-335) with `token`,
+  `device_id` and `debug`.
+- HELM-336: `matched: true` finishes the check; when `primary` is `true` (or
+  missing) the attribution ID replaces the stored one and is passed to analytics.
+  `not_apple_ads`, `invalid_token` and any other final reason finish the check and
+  store nothing. `pending`, a failed request or an unusable response counts as one
+  attempt; the SDK tries again with a new token on the next launch or return to the
+  foreground, up to 4 attempts in total within 24 hours of the first try. If
+  AdServices throws, the SDK stops for this launch and tries again on the next one.
+- HELM-336: new `UserDefaults` keys `helm_apple_ads_finished`,
+  `helm_apple_ads_attempts` and `helm_apple_ads_first_attempt`, cleared by
+  `Helm.attribution.reset()` (so the check runs again on the next launch).
+
+### Changed
+- HELM-336: `match()` also stops once an Apple Ads attribution is stored, the same
+  way it does for a clipboard attribution.
+
 ## [1.7.0] - 2026-10-27
 
 Clipboard handoff for iOS install attribution. Additive and backwards-compatible:
@@ -279,7 +311,8 @@ them are behavioral changes worth reading before you upgrade:
 - `Helm.attribution.increment(_:metadata:)` for fire-and-forget event tracking.
 - Swift Package Manager support for iOS 15+ and macOS 12+.
 
-[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.7.0...HEAD
+[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.8.0...HEAD
+[1.8.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.7.0...1.8.0
 [1.7.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.6.0...1.7.0
 [1.6.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.5.0...1.6.0
 [1.5.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.4.0...1.5.0
