@@ -4,6 +4,51 @@ All notable changes to the Helm iOS SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-10-27
+
+Clipboard handoff for iOS install attribution. Additive and backwards-compatible:
+no existing API changed. The new views need iOS 16; the package still supports
+iOS 15, where `hasClipboardHandoff()` returns `false`.
+
+### Added
+- HELM-325: `Helm.attribution.hasClipboardHandoff() async -> Bool` says whether the
+  app should show the Paste button. It asks iOS only whether the clipboard
+  probably holds a web URL (`hasURLs` and `detectPatterns` with
+  `probableWebURL`), which shows no prompt and no "pasted from" notice. It
+  returns `false` on iOS 15 and macOS, once a code has been redeemed for this
+  installation, while a code is queued, and while the clipboard still holds
+  contents the user already pasted without a match.
+- HELM-325: after the first `hasClipboardHandoff()` call, the SDK checks again
+  when the app returns to the foreground and on `UIPasteboard.changedNotification`,
+  and posts `Notification.Name.helmClipboardHandoffAvailabilityDidChange`
+  (`userInfo["available"]`, a `Bool`) when the answer changes.
+- HELM-325: `HelmPasteButton` (SwiftUI, wraps `PasteButton(payloadType: URL.self)`)
+  and `Helm.attribution.makePasteControl(configuration:onResult:)` (UIKit, returns
+  a `UIPasteControl` whose target accepts `UTType.url`). Both report a new
+  `ClipboardHandoffResult` (`.matched`, `.notMatched(reason:)` or `.failed`) on
+  the main actor.
+- HELM-325: a pasted URL is sent only if it is `https` and its path is exactly
+  `/h/<code>/` with a code of at least 12 characters from `A-Z a-z 0-9 _ -`.
+  Anything else is ignored and reported as `.notMatched(reason: "not_handoff_url")`.
+- HELM-325: the code is redeemed with `POST /api/client/v1/attribution/clipboard/`
+  (HELM-323), body `code`, `device_id` and `debug`. On a match the code is marked
+  redeemed; when the response's `primary` is `true` (or missing), the attribution
+  ID replaces any earlier `match()` result and is passed to analytics, and the
+  clipboard is cleared if its change count has not moved since the paste. An
+  unmatched response stores nothing new. Events recorded during the request wait
+  for its answer.
+- HELM-325: a redeem that fails on the network (no connection, timeout, 5xx) is
+  kept in the existing offline queue as a new `clipboard_handoff` entry and
+  replayed like promo codes and transactions. A replay never clears the clipboard.
+- HELM-325: new `UserDefaults` keys `helm_attribution_method`,
+  `helm_clipboard_redeemed` and `helm_clipboard_dismissed_change_count`, cleared by
+  `Helm.attribution.reset()`.
+
+### Changed
+- HELM-325: once a clipboard attribution is stored, `match()` does nothing, and a
+  `match()` response that arrives after a clipboard attribution is ignored. The
+  clipboard result wins whichever finishes last.
+
 ## [1.6.0] - 2026-10-25
 
 User feedback. Additive and backwards-compatible: no existing API changed.
@@ -229,7 +274,8 @@ them are behavioral changes worth reading before you upgrade:
 - `Helm.attribution.increment(_:metadata:)` for fire-and-forget event tracking.
 - Swift Package Manager support for iOS 15+ and macOS 12+.
 
-[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.6.0...HEAD
+[Unreleased]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.7.0...HEAD
+[1.7.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.6.0...1.7.0
 [1.6.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.5.0...1.6.0
 [1.5.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.4.0...1.5.0
 [1.4.0]: https://github.com/Helm-Development/Helm-iOS-SDK/compare/1.3.0...1.4.0

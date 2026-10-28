@@ -10,6 +10,7 @@ The official Swift SDK for [Helm](https://helmcode.dev). Attribute installs, tra
 ## Features
 
 - **Attribution matching** — match each install to the campaign, channel, or tracking link that drove it, using device-side signals (no IDFA required).
+- **Clipboard handoff** (iOS 16+) — attribute a new install to the exact tracking link tap or landing page tap that led to it. Helm's download page copies a code, and Apple's Paste button hands it to the SDK in your app with no system paste prompt.
 - **Event tracking** — record conversion events (`signup`, `purchase`, etc.) with optional metadata, automatically linked to the matched attribution source.
 - **Influencer promo codes** — link a user to an influencer's code, read back the paywall offering to present, and report the purchase's original transaction id for revenue attribution.
 - **Offline-tolerant** — promo-code and transaction submissions that can't reach the server are queued on device and replayed automatically for up to 30 days; attribution status is cached per user so paywalls render correctly offline.
@@ -37,7 +38,7 @@ The official Swift SDK for [Helm](https://helmcode.dev). Attribute installs, tra
    ```
    https://github.com/Helm-Development/Helm-iOS-SDK.git
    ```
-3. Set the dependency rule to **Up to Next Major Version** starting from `1.6.0`.
+3. Set the dependency rule to **Up to Next Major Version** starting from `1.7.0`.
 4. Add the `Helm` library product to your app target.
 
 ### Swift Package Manager (Package.swift)
@@ -46,7 +47,7 @@ Add Helm to the `dependencies` array of your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Helm-Development/Helm-iOS-SDK.git", from: "1.6.0")
+    .package(url: "https://github.com/Helm-Development/Helm-iOS-SDK.git", from: "1.7.0")
 ]
 ```
 
@@ -154,6 +155,123 @@ Helm.attribution.increment("purchase", metadata: [
 ```
 
 All event calls are fire-and-forget — they return immediately and never throw.
+
+## Clipboard handoff (iOS 16 and later)
+
+The clipboard handoff ties a new install to the exact tracking link or landing page button the user tapped, including the source token and the user behind the link. It needs **iOS clipboard attribution** turned on for the destination in Helm (Settings > Destinations).
+
+How it works:
+
+1. On an iPhone, Helm shows a page with a "Download on the App Store" button instead of redirecting straight to the App Store. (A landing page that uses the Helm script uses its own App Store button.)
+2. Tapping the button copies a handoff URL, `https://<your link domain>/h/<code>/`, to the clipboard and opens the App Store.
+3. The user installs and opens your app. Your app asks the SDK whether the clipboard holds a URL. This check shows no prompt and no "pasted from" notice.
+4. If it does, your app shows a screen with Apple's **Paste** button. iOS treats the tap on that button as the user's permission, so no system pop-up appears.
+5. The SDK sends the code to Helm, which records the attribution for that exact tap.
+
+The SDK never reads the clipboard in code. It reads it only through Apple's Paste button (SwiftUI `PasteButton`, UIKit `UIPasteControl`), which needs iOS 16. On iOS 15, `hasClipboardHandoff()` returns `false`.
+
+### 1. Check for a handoff
+
+```swift
+if await Helm.attribution.hasClipboardHandoff() {
+    // Show your "Paste to continue" screen with the Paste button below.
+}
+```
+
+`hasClipboardHandoff()` returns `false` once a code has been redeemed for this installation, while a code is waiting to be sent again, and when the user already pasted the current clipboard contents without a match. After the first call, the SDK checks again when the app returns to the foreground and when the clipboard changes, and posts `Notification.Name.helmClipboardHandoffAvailabilityDidChange` (with `userInfo["available"]` as a `Bool`) when the answer changes. That lets you show the Paste button if the code arrives after launch. Apps that never call `hasClipboardHandoff()` never have the clipboard checked.
+
+### 2. Show the Paste button
+
+#### SwiftUI
+
+```swift
+import SwiftUI
+import Helm
+
+@available(iOS 16.0, *)
+struct PasteHandoffView: View {
+    let onFinished: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Tap Paste to pick up where you left off.")
+            HelmPasteButton { result in
+                // Called on the main actor. Every result means "move on".
+                onFinished()
+            }
+            .labelStyle(.titleAndIcon)
+            .buttonBorderShape(.capsule)
+            Button("Skip", action: onFinished)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .helmClipboardHandoffAvailabilityDidChange)) { note in
+            if note.userInfo?["available"] as? Bool == false { onFinished() }
+        }
+    }
+}
+
+// Where you decide which screen to show:
+if #available(iOS 16.0, *), await Helm.attribution.hasClipboardHandoff() {
+    showPasteHandoff = true
+}
+```
+
+#### UIKit
+
+```swift
+import UIKit
+import Helm
+
+@available(iOS 16.0, *)
+final class PasteHandoffViewController: UIViewController {
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .systemBackground
+
+        let configuration = UIPasteControl.Configuration()
+        configuration.displayMode = .iconAndLabel
+        configuration.cornerStyle = .capsule
+
+        let pasteControl = Helm.attribution.makePasteControl(configuration: configuration) { [weak self] result in
+            // Called on the main actor. Every result means "move on".
+            self?.dismiss(animated: true)
+        }
+        pasteControl.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(pasteControl)
+        NSLayoutConstraint.activate([
+            pasteControl.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            pasteControl.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            pasteControl.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
+        ])
+    }
+}
+```
+
+The control accepts URLs (`UTType.url`) only, and keeps its paste target alive for as long as the control exists.
+
+> **Keep the Paste button clearly visible.** iOS checks that the button was visibly shown when it was tapped. Give it enough contrast with the background, do not cover it with other views, and do not make it transparent or hide it. If iOS decides it was not visible, the tap does nothing. iOS draws the button's label and icon; you cannot replace them.
+
+### 3. Handle the result
+
+The completion handler receives a `ClipboardHandoffResult`:
+
+| Result | Meaning |
+|--------|---------|
+| `.matched` | Helm matched the code and recorded the attribution. |
+| `.notMatched(reason:)` | The paste did not attribute the install. `reason` is Helm's answer (`"unknown"`, `"expired"` or `"redeemed"`), or `"not_handoff_url"` when the pasted URL was not a Helm handoff URL. In that last case nothing is sent to Helm. |
+| `.failed` | The code could not be redeemed now. If the network was unreachable, the SDK keeps the code and sends it again later (see below). |
+
+None of these is an error to show the user. Move on to the next screen in every case.
+
+### What the SDK does with the code
+
+- **Checks the URL.** Only `https` URLs whose path is exactly `/h/<code>/`, where the code is at least 12 characters from `A-Z`, `a-z`, `0-9`, `_` and `-`, are sent. Any other URL is ignored. Helm's server does the real check.
+- **Sends** `POST /api/client/v1/attribution/clipboard/` with `code`, `device_id` and `debug`. Events you record while the request is in flight wait for its answer, so they carry the new attribution.
+- **On a match,** marks the code as redeemed. If Helm says this attribution is the **primary** one, its ID replaces any earlier attribution from `match()` and is passed to analytics. (An installation can also have an Apple Ads attribution; Helm makes the one with the later touch primary.) The SDK then clears the clipboard, but only if it has not changed since the paste.
+- **On no match,** stores nothing new.
+- **Offline.** No connection, a timeout or a 5xx keeps the code in the offline queue, which is sent again on the next `Helm.configure(...)`, when the app returns to the foreground, and before the next attribution call. A replayed code is handled like a fresh one, except that the clipboard is not cleared. Helm accepts a code for 24 hours after the tap.
+- **With `match()`.** If both run on first launch, the clipboard result wins whichever finishes last. Once a clipboard attribution is stored, `match()` does nothing.
+
+`Helm.attribution.reset()` clears the clipboard handoff state along with the rest of the attribution state.
 
 ## Influencer attribution
 
@@ -387,6 +505,18 @@ public final class Attribution {
     /// Idempotent — safe to call on every launch.
     public func match()
 
+    /// Whether the clipboard probably holds a Helm clipboard handoff URL, so
+    /// the app should show the Paste button. Shows no prompt. Always `false`
+    /// on iOS 15, once a code has been redeemed, and while one is queued.
+    public func hasClipboardHandoff() async -> Bool
+
+    /// A UIKit Paste button (iOS 16+) that redeems a pasted clipboard handoff
+    /// URL. `onResult` is called on the main actor.
+    @available(iOS 16.0, *)
+    @MainActor
+    public func makePasteControl(configuration: UIPasteControl.Configuration? = nil,
+                                 onResult: (@MainActor (ClipboardHandoffResult) -> Void)? = nil) -> UIPasteControl
+
     /// Record an attribution event.
     /// - Parameters:
     ///   - eventType: The event name (e.g. "signup", "purchase").
@@ -425,6 +555,31 @@ public final class Attribution {
     public func reset()
 }
 ```
+
+### `HelmPasteButton`
+
+```swift
+/// A SwiftUI Paste button (iOS 16+) that redeems a pasted clipboard handoff
+/// URL. Wraps `PasteButton(payloadType: URL.self)`.
+@available(iOS 16.0, *)
+public struct HelmPasteButton: View {
+    public init(onResult: (@MainActor (ClipboardHandoffResult) -> Void)? = nil)
+}
+```
+
+### `ClipboardHandoffResult`
+
+```swift
+public enum ClipboardHandoffResult: Equatable, Sendable {
+    case matched                       // Helm recorded the attribution
+    case notMatched(reason: String)    // "unknown", "expired", "redeemed" or "not_handoff_url"
+    case failed                        // not redeemed now; queued if the network was unreachable
+}
+```
+
+### `Notification.Name.helmClipboardHandoffAvailabilityDidChange`
+
+Posted on the main queue when the answer to `hasClipboardHandoff()` changes, after the app has called it once. `userInfo["available"]` is the new answer as a `Bool`.
 
 ### `PromoCodeResult`
 
@@ -518,10 +673,13 @@ The Helm SDK is designed to be privacy-respecting by default:
 - **No third-party trackers** — all requests go directly to your configured Helm backend. Helm's backend treats each customer tenant as a first-party silo; cross-tenant correlation would change this analysis.
 - **No persistent device fingerprint** — device signals (screen size, locale, timezone, OS version) are collected only during the first attribution match and are not stored on-device after the request completes.
 - **Server-derived IP** — your client never reads or transmits its own IP address; the Helm backend reads it from the request envelope.
+- **No clipboard reads in code** — for the clipboard handoff, the SDK only asks iOS whether the clipboard probably holds a web URL (`hasURLs` and pattern detection with `probableWebURL`), which Apple documents as not notifying the user. It reads the clipboard's contents only when the user taps Apple's Paste button. It never calls `UIPasteboard.string`, `.url`, `.urls`, `.items`, `detectValues` or `detectedValues`.
 
 ### SDK-shipped privacy manifest
 
 Helm ships its own `PrivacyInfo.xcprivacy` inside the SDK bundle. The manifest declares Helm's Required Reason API usage (`UserDefaults`, reason `CA92.1` — read/write app state owned by the SDK) and the data categories Helm itself collects. Because the SDK carries this manifest, you do **not** need to add Helm-specific Required Reason API entries to your app's own privacy manifest — Xcode picks Helm's up automatically.
+
+The clipboard handoff adds no Required Reason entry: `UIPasteboard` and its pattern detection are not on Apple's [Required Reason API list](https://developer.apple.com/documentation/bundleresources/app-privacy-configuration/nsprivacyaccessedapitypes/nsprivacyaccessedapitype), which covers only file timestamps, system boot time, disk space, active keyboards and `UserDefaults` (checked October 2026).
 
 You still need to declare the data Helm collects in your **App Privacy** nutrition label in App Store Connect — the manifest covers Apple's static API audit; the nutrition label is what the user sees on the product page.
 
@@ -575,10 +733,10 @@ The SDK emits structured logs via Apple's unified logging system under the subsy
 Helm follows [Semantic Versioning](https://semver.org):
 
 - **Major** (`2.0.0`) — breaking API changes
-- **Minor** (`1.6.0`) — additive, backwards-compatible API
-- **Patch** (`1.6.1`) — backwards-compatible bug fixes
+- **Minor** (`1.7.0`) — additive, backwards-compatible API
+- **Patch** (`1.7.1`) — backwards-compatible bug fixes
 
-The current release is **1.6.0**. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+The current release is **1.7.0**. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ### Tagging convention
 
