@@ -36,6 +36,12 @@ public final class Attribution: @unchecked Sendable {
     private let appleAdsLock = NSLock()
     private var appleAdsInFlight = false
     private var appleAdsStoppedForThisLaunch = false
+    /// Whether the app is in the background. The Apple Ads check stops
+    /// sending once it is. Set by the shared instance's lifecycle observers.
+    private var appInBackground = false
+    /// Waits between Apple Ads sends. `Task.sleep` in the app; injected so
+    /// tests run instantly.
+    private let appleAdsWait: @Sendable (TimeInterval) async -> Void
 
     // HELM-187: event queue + match-in-flight state.
     //
@@ -100,6 +106,7 @@ public final class Attribution: @unchecked Sendable {
         self.appleAdsTokenProvider = UnavailableAppleAdsTokenProvider()
         #endif
         self.watchesClipboard = true
+        self.appleAdsWait = Attribution.sleep
         observeForeground()
     }
 
@@ -118,8 +125,9 @@ public final class Attribution: @unchecked Sendable {
     /// `watchesClipboard` is `true`; re-checks are exercised through
     /// `recheckClipboardHandoff()` directly.
     ///
-    /// HELM-336 adds an `appleAdsTokenProvider` seam. The default reports
-    /// that AdServices is unavailable, so test instances never call it.
+    /// HELM-336 adds an `appleAdsTokenProvider` seam, whose default reports
+    /// that AdServices is unavailable so test instances never call it, and an
+    /// `appleAdsWait` seam, whose default does not wait.
     internal init(store: AttributionStore,
                   pendingStore: PendingSubmissionStore = PendingSubmissionStore(),
                   statusCache: AttributionStatusCache = AttributionStatusCache(),
@@ -127,7 +135,8 @@ public final class Attribution: @unchecked Sendable {
                   userHash: @escaping () -> String? = { Analytics.shared.currentUserHash },
                   pasteboard: PasteboardAccess = NoPasteboard(),
                   watchesClipboard: Bool = false,
-                  appleAdsTokenProvider: AppleAdsTokenProviding = UnavailableAppleAdsTokenProvider()) {
+                  appleAdsTokenProvider: AppleAdsTokenProviding = UnavailableAppleAdsTokenProvider(),
+                  appleAdsWait: @escaping @Sendable (TimeInterval) async -> Void = { _ in }) {
         self.store = store
         self.pendingStore = pendingStore
         self.statusCache = statusCache
@@ -136,6 +145,12 @@ public final class Attribution: @unchecked Sendable {
         self.pasteboard = pasteboard
         self.watchesClipboard = watchesClipboard
         self.appleAdsTokenProvider = appleAdsTokenProvider
+        self.appleAdsWait = appleAdsWait
+    }
+
+    /// Sleep without blocking a thread. A cancelled task stops waiting early.
+    private static let sleep: @Sendable (TimeInterval) async -> Void = { seconds in
+        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
     }
 
     deinit {
@@ -153,10 +168,19 @@ public final class Attribution: @unchecked Sendable {
             forName: UIApplication.willEnterForegroundNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
+            self?.setAppInBackground(false)
             self?.replayPendingSubmissions()
             self?.startAppleAdsCheck()
         }
         observerTokens.append(token)
+        // HELM-336: the Apple Ads check stops sending in the background.
+        let background = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.setAppInBackground(true)
+        }
+        observerTokens.append(background)
         #endif
     }
 
@@ -731,20 +755,28 @@ public final class Attribution: @unchecked Sendable {
 
     /// Check once per installation whether the install came from Apple Ads.
     ///
-    /// - Gets a new AdServices token. If AdServices throws, stops for this
-    ///   launch and tries again on the next one. If AdServices is not
-    ///   available, the check is finished.
-    /// - Sends `POST attribution/apple-ads/` with `token`, `device_id` and
-    ///   `debug`.
+    /// One call is one **attempt**, made of up to
+    /// `AttributionStore.maxAppleAdsSendsPerAttempt` sends:
+    ///
+    /// - Each send gets a new AdServices token and posts it to
+    ///   `attribution/apple-ads/` with `token`, `device_id` and `debug`.
+    ///   Helm asks Apple once per send. Apple answers "not ready" if asked too
+    ///   soon after the token was made, so the waiting happens here.
     /// - `matched: true` finishes the check. When the response says the
     ///   attribution is `primary`, its ID replaces the stored attribution ID
     ///   and is passed to analytics.
     /// - `not_apple_ads`, `invalid_token` or any other final reason finishes
     ///   the check and stores nothing.
-    /// - `pending`, a failed request or an unusable response counts as one
-    ///   attempt. The next launch or return to the foreground tries again
-    ///   with a new token, up to `AttributionStore.maxAppleAdsAttempts`
-    ///   attempts within 24 hours of the first try. Then the check is
+    /// - `pending`, a failed request or an unusable response leads to another
+    ///   send after `AttributionStore.appleAdsSendInterval` (5 seconds), unless
+    ///   the app has gone to the background.
+    /// - If no send gets a final answer, the attempt counts once against the
+    ///   budget of `AttributionStore.maxAppleAdsAttempts` attempts within 24
+    ///   hours of the first try. The next launch or return to the foreground
+    ///   makes the next attempt. Once the budget is used, the check is
+    ///   finished.
+    /// - If AdServices throws, the check stops for this launch and tries again
+    ///   on the next one. If AdServices is not available, the check is
     ///   finished.
     internal func _checkAppleAdsAttribution() async {
         guard Configuration.shared?.appleAdsAttribution == true else { return }
@@ -760,44 +792,67 @@ public final class Attribution: @unchecked Sendable {
             return
         }
 
-        let token: String?
-        do {
-            token = try appleAdsTokenProvider.attributionToken()
-        } catch {
-            logger.info("Apple Ads token unavailable — trying again next launch: \(error.localizedDescription, privacy: .public)")
-            stopAppleAdsForThisLaunch()
-            return
-        }
-        guard let token, !token.isEmpty else {
-            logger.info("Apple Ads check finished — AdServices is not available")
-            store.markAppleAdsFinished()
-            return
+        for send in 1 ... AttributionStore.maxAppleAdsSendsPerAttempt {
+            if send > 1 {
+                await appleAdsWait(AttributionStore.appleAdsSendInterval)
+                if isAppInBackground {
+                    logger.info("Apple Ads check paused — the app went to the background")
+                    break
+                }
+            }
+
+            let token: String?
+            do {
+                token = try appleAdsTokenProvider.attributionToken()
+            } catch {
+                logger.info("Apple Ads token unavailable — trying again next launch: \(error.localizedDescription, privacy: .public)")
+                stopAppleAdsForThisLaunch()
+                // Before any send there is nothing to count. After a send
+                // without a final answer, this attempt still counts.
+                if send > 1 { recordAppleAdsRetry() }
+                return
+            }
+            guard let token, !token.isEmpty else {
+                logger.info("Apple Ads check finished — AdServices is not available")
+                store.markAppleAdsFinished()
+                return
+            }
+
+            let outcome: AppleAdsOutcome
+            do {
+                let response = try await HelmHTTPClient.post(
+                    path: APIPath.attributionAppleAds,
+                    body: appleAdsBody(token: token, debug: currentDebug())
+                )
+                outcome = applyAppleAdsResponse(response)
+            } catch {
+                logger.error("Apple Ads request failed: \(error.localizedDescription, privacy: .public)")
+                outcome = .notReady
+            }
+            if outcome == .finished { return }
         }
 
-        do {
-            let response = try await HelmHTTPClient.post(
-                path: APIPath.attributionAppleAds,
-                body: appleAdsBody(token: token, debug: currentDebug())
-            )
-            applyAppleAdsResponse(response)
-        } catch {
-            logger.error("Apple Ads request failed: \(error.localizedDescription, privacy: .public)")
-            recordAppleAdsRetry()
-        }
+        recordAppleAdsRetry()
     }
 
-    private func applyAppleAdsResponse(_ response: [String: Any]) {
+    /// The result of one Apple Ads send.
+    private enum AppleAdsOutcome: Equatable {
+        /// A final answer; the check is finished.
+        case finished
+        /// `pending`, a failed request or an unusable response; send again.
+        case notReady
+    }
+
+    private func applyAppleAdsResponse(_ response: [String: Any]) -> AppleAdsOutcome {
         guard let matched = response["matched"] as? Bool else {
             logger.error("Apple Ads response has no `matched` field")
-            recordAppleAdsRetry()
-            return
+            return .notReady
         }
 
         if matched {
             guard let attributionId = response["attribution_id"] as? String, !attributionId.isEmpty else {
                 logger.error("Apple Ads matched without an attribution_id")
-                recordAppleAdsRetry()
-                return
+                return .notReady
             }
             // HELM-335: when the installation also has a clipboard
             // attribution, the later touch is primary. Only the primary one
@@ -811,17 +866,17 @@ public final class Attribution: @unchecked Sendable {
                 logger.info("Apple Ads matched but not primary — stored attribution kept")
             }
             store.markAppleAdsFinished()
-            return
+            return .finished
         }
 
         let reason = response["reason"] as? String ?? ""
         if reason == "pending" {
-            logger.info("Apple Ads record not ready — trying again later")
-            recordAppleAdsRetry()
-        } else {
-            logger.info("Apple Ads check finished — reason=\(reason, privacy: .public)")
-            store.markAppleAdsFinished()
+            logger.info("Apple Ads record not ready yet")
+            return .notReady
         }
+        logger.info("Apple Ads check finished — reason=\(reason, privacy: .public)")
+        store.markAppleAdsFinished()
+        return .finished
     }
 
     /// Count an attempt without a final answer, and finish the check once the
@@ -831,6 +886,8 @@ public final class Attribution: @unchecked Sendable {
         if store.appleAdsRetriesExhausted() {
             logger.info("Apple Ads check finished — retries used up")
             store.markAppleAdsFinished()
+        } else {
+            logger.info("Apple Ads attempt used — trying again on the next launch or foreground")
         }
     }
 
@@ -856,6 +913,20 @@ public final class Attribution: @unchecked Sendable {
         appleAdsLock.lock()
         defer { appleAdsLock.unlock() }
         appleAdsInFlight = false
+    }
+
+    /// Record whether the app is in the background. Internal so tests can
+    /// stand in for the lifecycle notifications.
+    internal func setAppInBackground(_ value: Bool) {
+        appleAdsLock.lock()
+        defer { appleAdsLock.unlock() }
+        appInBackground = value
+    }
+
+    private var isAppInBackground: Bool {
+        appleAdsLock.lock()
+        defer { appleAdsLock.unlock() }
+        return appInBackground
     }
 
     private func stopAppleAdsForThisLaunch() {

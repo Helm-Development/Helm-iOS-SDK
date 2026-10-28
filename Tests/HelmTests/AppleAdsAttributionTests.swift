@@ -17,6 +17,7 @@ final class AppleAdsAttributionTests: XCTestCase {
     private var suiteName: String!
     private var store: AttributionStore!
     private var tokens: FakeAppleAdsTokenProvider!
+    private var waits: WaitRecorder!
     private var attribution: Attribution!
 
     override func setUp() {
@@ -25,6 +26,7 @@ final class AppleAdsAttributionTests: XCTestCase {
         defaults = UserDefaults(suiteName: suiteName)!
         store = AttributionStore(defaults: defaults)
         tokens = FakeAppleAdsTokenProvider()
+        waits = WaitRecorder()
         attribution = makeAttribution()
         Configuration.shared = nil
         AppleAdsMockURLProtocol.reset()
@@ -36,6 +38,7 @@ final class AppleAdsAttributionTests: XCTestCase {
         suiteName = nil
         store = nil
         tokens = nil
+        waits = nil
         attribution = nil
         Configuration.shared = nil
         AppleAdsMockURLProtocol.reset()
@@ -52,7 +55,8 @@ final class AppleAdsAttributionTests: XCTestCase {
                     pendingStore: PendingSubmissionStore(defaults: defaults),
                     statusCache: AttributionStatusCache(defaults: defaults),
                     installationId: { Self.installationId },
-                    appleAdsTokenProvider: tokens)
+                    appleAdsTokenProvider: tokens,
+                    appleAdsWait: { [waits] seconds in waits!.record(seconds) })
     }
 
     private func configure(appleAdsAttribution: Bool = true,
@@ -190,7 +194,38 @@ final class AppleAdsAttributionTests: XCTestCase {
 
     // MARK: - Retries
 
-    func test_pending_retries_with_a_new_token_up_to_the_limit() async {
+    private var sentTokens: [String] {
+        appleAdsRequests.compactMap { Self.body(of: $0)?["token"] as? String }
+    }
+
+    func test_pending_pending_matched_within_one_launch() async {
+        var answers: [AppleAdsMockURLProtocol.Outcome] = [
+            Self.notMatched("pending"), Self.notMatched("pending"), Self.matched("attr-ads"),
+        ]
+        configure { _ in answers.removeFirst() }
+
+        await attribution._checkAppleAdsAttribution()
+
+        XCTAssertEqual(store.attributionId, "attr-ads")
+        XCTAssertTrue(store.appleAdsFinished)
+        XCTAssertEqual(store.appleAdsAttemptCount, 0, "A final answer uses no attempt")
+        XCTAssertEqual(sentTokens, ["token-1", "token-2", "token-3"],
+                       "Every send asks AdServices for a new token")
+        XCTAssertEqual(waits.recorded, [AttributionStore.appleAdsSendInterval, AttributionStore.appleAdsSendInterval],
+                       "5 seconds before the second and third sends")
+    }
+
+    func test_three_pendings_use_one_attempt_of_the_budget() async {
+        configure { _ in Self.notMatched("pending") }
+
+        await attribution._checkAppleAdsAttribution()
+
+        XCTAssertEqual(appleAdsRequests.count, AttributionStore.maxAppleAdsSendsPerAttempt)
+        XCTAssertEqual(store.appleAdsAttemptCount, 1)
+        XCTAssertFalse(store.appleAdsFinished)
+    }
+
+    func test_pending_stops_after_the_budget_of_attempts() async {
         configure { _ in Self.notMatched("pending") }
 
         // Each call stands in for a later launch or return to the foreground.
@@ -198,16 +233,17 @@ final class AppleAdsAttributionTests: XCTestCase {
             await attribution._checkAppleAdsAttribution()
         }
 
-        XCTAssertEqual(appleAdsRequests.count, AttributionStore.maxAppleAdsAttempts,
-                       "The first try plus 3 more")
-        XCTAssertEqual(appleAdsRequests.compactMap { Self.body(of: $0)?["token"] as? String },
-                       ["token-1", "token-2", "token-3", "token-4"],
-                       "Every attempt asks AdServices for a new token")
+        XCTAssertEqual(store.appleAdsAttemptCount, AttributionStore.maxAppleAdsAttempts,
+                       "The first attempt plus 3 more")
+        XCTAssertEqual(appleAdsRequests.count,
+                       AttributionStore.maxAppleAdsAttempts * AttributionStore.maxAppleAdsSendsPerAttempt)
+        XCTAssertEqual(Set(sentTokens).count, appleAdsRequests.count, "No token is sent twice")
         XCTAssertTrue(store.appleAdsFinished)
     }
 
-    func test_pending_then_match_stores_the_attribution() async {
-        var answers: [AppleAdsMockURLProtocol.Outcome] = [Self.notMatched("pending"), Self.matched("attr-ads")]
+    func test_a_later_launch_can_still_match() async {
+        var answers: [AppleAdsMockURLProtocol.Outcome] = Array(repeating: Self.notMatched("pending"), count: 3)
+            + [Self.matched("attr-ads")]
         configure { _ in answers.removeFirst() }
 
         await attribution._checkAppleAdsAttribution()
@@ -215,29 +251,58 @@ final class AppleAdsAttributionTests: XCTestCase {
         await attribution._checkAppleAdsAttribution()
 
         XCTAssertEqual(store.attributionId, "attr-ads")
+        XCTAssertEqual(store.appleAdsAttemptCount, 1)
         XCTAssertTrue(store.appleAdsFinished)
     }
 
-    func test_transport_failure_retries() async {
+    func test_transport_failure_is_retried_within_the_launch() async {
         var answers: [AppleAdsMockURLProtocol.Outcome] = [.failure(URLError(.notConnectedToInternet)), Self.matched("attr-ads")]
         configure { _ in answers.removeFirst() }
 
         await attribution._checkAppleAdsAttribution()
-        XCTAssertFalse(store.appleAdsFinished)
-        XCTAssertEqual(store.appleAdsAttemptCount, 1)
 
-        await attribution._checkAppleAdsAttribution()
         XCTAssertEqual(store.attributionId, "attr-ads")
         XCTAssertEqual(appleAdsRequests.count, 2)
+        XCTAssertEqual(store.appleAdsAttemptCount, 0)
     }
 
-    func test_an_http_error_counts_as_an_attempt() async {
+    func test_an_http_error_is_retried_and_counts_as_one_attempt() async {
         configure { _ in Self.json(["error": ["code": "not_found", "message": "no"]], status: 404) }
 
         await attribution._checkAppleAdsAttribution()
 
         XCTAssertFalse(store.appleAdsFinished, "The endpoint may not be deployed yet; try again later")
+        XCTAssertEqual(appleAdsRequests.count, AttributionStore.maxAppleAdsSendsPerAttempt)
         XCTAssertEqual(store.appleAdsAttemptCount, 1)
+    }
+
+    func test_going_to_the_background_stops_the_sends() async {
+        configure { _ in Self.notMatched("pending") }
+        let attribution = self.attribution!
+        waits.onWait = { attribution.setAppInBackground(true) }
+
+        await attribution._checkAppleAdsAttribution()
+
+        XCTAssertEqual(appleAdsRequests.count, 1, "No send after the app went to the background")
+        XCTAssertEqual(store.appleAdsAttemptCount, 1)
+
+        // Back in the foreground: the next attempt sends again.
+        attribution.setAppInBackground(false)
+        waits.onWait = nil
+        await attribution._checkAppleAdsAttribution()
+        XCTAssertEqual(appleAdsRequests.count, 1 + AttributionStore.maxAppleAdsSendsPerAttempt)
+    }
+
+    func test_a_token_error_after_a_pending_send_counts_the_attempt() async {
+        configure { _ in Self.notMatched("pending") }
+        let tokens = self.tokens!
+        waits.onWait = { tokens.failNext = true }
+
+        await attribution._checkAppleAdsAttribution()
+
+        XCTAssertEqual(appleAdsRequests.count, 1)
+        XCTAssertEqual(store.appleAdsAttemptCount, 1)
+        XCTAssertFalse(store.appleAdsFinished)
     }
 
     func test_the_check_stops_24_hours_after_the_first_try() async {
@@ -322,6 +387,37 @@ final class AppleAdsAttributionTests: XCTestCase {
         XCTAssertFalse(store.appleAdsFinished)
         XCTAssertEqual(store.appleAdsAttemptCount, 0)
         XCTAssertNil(store.appleAdsFirstAttempt)
+    }
+}
+
+// MARK: - WaitRecorder
+
+/// Stands in for the 5-second wait between sends. Records each wait and
+/// returns at once; `onWait` lets a test act during the wait.
+final class WaitRecorder: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var _recorded: [TimeInterval] = []
+    private var _onWait: (() -> Void)?
+
+    var recorded: [TimeInterval] { locked { _recorded } }
+    var onWait: (() -> Void)? {
+        get { locked { _onWait } }
+        set { locked { _onWait = newValue } }
+    }
+
+    func record(_ seconds: TimeInterval) {
+        let action: (() -> Void)? = locked {
+            _recorded.append(seconds)
+            return _onWait
+        }
+        action?()
+    }
+
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
     }
 }
 

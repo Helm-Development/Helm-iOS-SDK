@@ -24,8 +24,13 @@ compiling unchanged. The check is on by default.
 - HELM-336: `matched: true` finishes the check; when `primary` is `true` (or
   missing) the attribution ID replaces the stored one and is passed to analytics.
   `not_apple_ads`, `invalid_token` and any other final reason finish the check and
-  store nothing. `pending`, a failed request or an unusable response counts as one
-  attempt; the SDK tries again with a new token on the next launch or return to the
+  store nothing. On `pending`, a failed request or an unusable response, the SDK
+  waits 5 seconds (`Task.sleep`, never on the main thread) and sends again with a
+  new token, up to 3 sends in one launch, following Apple's advice to retry a
+  not-ready record every 5 seconds up to 3 times. Helm's server asks Apple once per
+  send and does not wait. The sends stop if the app goes to the background.
+- HELM-336: the up-to-3 sends of one launch count as one attempt. Without a final
+  answer, the SDK makes another attempt on the next launch or return to the
   foreground, up to 4 attempts in total within 24 hours of the first try. If
   AdServices throws, the SDK stops for this launch and tries again on the next one.
 - HELM-336: new `UserDefaults` keys `helm_apple_ads_finished`,

@@ -39,9 +39,18 @@ internal final class AttributionStore: @unchecked Sendable {
         case appleAds = "apple_ads"
     }
 
-    /// HELM-336: the most times the Apple Ads check sends a token without a
-    /// final answer: the first try plus 3 more. Exposed for tests.
+    /// HELM-336: the most Apple Ads attempts without a final answer: the first
+    /// plus 3 more. One attempt is up to `maxAppleAdsSendsPerAttempt` sends
+    /// in one launch. Exposed for tests.
     static let maxAppleAdsAttempts: Int = 4
+
+    /// HELM-336: the most sends in one attempt. Apple answers "not ready" if
+    /// asked too soon after the token was made, and advises retrying every 5
+    /// seconds up to 3 times. Exposed for tests.
+    static let maxAppleAdsSendsPerAttempt: Int = 3
+
+    /// HELM-336: the wait between sends in one attempt. Exposed for tests.
+    static let appleAdsSendInterval: TimeInterval = 5
 
     /// HELM-336: how long after the first try the Apple Ads check keeps
     /// retrying. Matches the token's 24-hour lifetime. Exposed for tests.
@@ -161,7 +170,7 @@ internal final class AttributionStore: @unchecked Sendable {
     }
 
     /// The number of Apple Ads attempts that ended without a final answer
-    /// (`pending` or a failed request).
+    /// (`pending` or a failed request on every send of the attempt).
     var appleAdsAttemptCount: Int {
         defaults.integer(forKey: Keys.appleAdsAttempts)
     }
